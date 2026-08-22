@@ -45,6 +45,31 @@ pip install git+https://github.com/JonathonLuiten/TrackEval.git
 pytest -q          # from the src/ directory
 ```
 
+## MOT17 evaluation from Colab/Jupyter
+
+MOT17 has tracking labels but no action labels, so it validates OCSI contributions
+1 and 2 (memory + association). Contribution 3 (behaviour feedback) is measured
+separately by `python -m ocsi.experiments.behaviour_feedback`.
+
+```python
+from ocsi.experiments.mot17_tracking import run_mot17_sequence
+
+payload = run_mot17_sequence(
+    seq_dir="/content/MOT17/train/MOT17-02-FRCNN",
+    cache_dir="/content/drive/MyDrive/ocsi_cache/MOT17-02-FRCNN",
+    output_dir="/content/ocsi_outputs",
+    stages=("baseline", "memory"),
+)
+
+for result in payload["results"]:
+    print(result["stage"], result["summary"])
+    print("MOT result file:", result["result_path"])
+```
+
+The first run builds cached YOLO + Re-ID detections under `cache_dir`; later runs
+replay those cached features and only rerun the tracker/ablation logic. Use the
+written result files with TrackEval for HOTA/AssA/DetA.
+
 ## Layout
 
 ```

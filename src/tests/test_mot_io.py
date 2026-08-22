@@ -1,9 +1,19 @@
 """Unit tests for MOTChallenge-format I/O (Phase 3.5 / 6 plumbing)."""
+import os
 import types
 
 import numpy as np
 
-from ocsi.eval import format_row, read_gt, read_results, tracker_rows, write_results
+from ocsi.eval import (
+    format_row,
+    frame_index_from_number,
+    frame_number_from_index,
+    mot_image_files,
+    read_gt,
+    read_results,
+    tracker_rows,
+    write_results,
+)
 
 
 def test_format_row_exact():
@@ -51,3 +61,16 @@ def test_tracker_rows_are_one_indexed():
     rec = types.SimpleNamespace(track_id=5, last_box=np.array([10.0, 20.0, 30.0, 40.0]))
     rows = tracker_rows(0, [rec])                             # 0-indexed frame -> MOT frame 1
     assert rows == [(1, 5, 10.0, 20.0, 30.0, 40.0, 1.0)]
+
+
+def test_mot17_frame_helpers_and_image_order(tmp_path):
+    img_dir = tmp_path / "MOT17-02-FRCNN" / "img1"
+    img_dir.mkdir(parents=True)
+    (img_dir / "000002.jpg").write_text("")
+    (img_dir / "000001.jpg").write_text("")
+    (img_dir / "notes.txt").write_text("")
+
+    assert frame_number_from_index(0) == 1
+    assert frame_index_from_number(1) == 0
+    files = mot_image_files(str(tmp_path / "MOT17-02-FRCNN"))
+    assert [os.path.basename(p) for p in files] == ["000001.jpg", "000002.jpg"]

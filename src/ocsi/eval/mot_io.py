@@ -21,6 +21,8 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
+from .mot17 import frame_number_from_index
+
 # (frame, track_id, x, y, w, h, conf)
 ResultRow = Tuple[int, int, float, float, float, float, float]
 
@@ -91,10 +93,10 @@ def read_gt(
 def tracker_rows(frame_idx: int, records, conf: float = 1.0) -> List[ResultRow]:
     """Convert one frame's tracker outputs to MOT rows.
 
-    The tracker is 0-indexed; MOT frames are 1-indexed, so we emit ``frame_idx + 1``.
+    The tracker is 0-indexed; MOT frames are 1-indexed.
     """
     rows: List[ResultRow] = []
     for r in records:
         x, y, w, h = (float(v) for v in r.last_box)
-        rows.append((frame_idx + 1, int(r.track_id), x, y, w, h, conf))
+        rows.append((frame_number_from_index(frame_idx), int(r.track_id), x, y, w, h, conf))
     return rows
