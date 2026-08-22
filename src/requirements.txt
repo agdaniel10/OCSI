@@ -1,0 +1,19 @@
+# Core (already present in this environment)
+numpy>=1.24
+scipy>=1.10
+opencv-python>=4.8
+pandas>=2.0
+
+# Perception adapters (Phase 1) — detector / Re-ID / pose
+ultralytics>=8.1
+torch>=2.0
+torchvision>=0.15
+
+# Config files
+pyyaml>=6.0
+
+# Tests
+pytest>=7.0
+
+# Evaluation: TrackEval is installed from source (not a stable PyPI package):
+#   pip install git+https://github.com/JonathonLuiten/TrackEval.git

@@ -1,0 +1,52 @@
+# OCSI default configuration.
+# Mirrors the dataclass defaults in ocsi/config.py. These are OUR engineering
+# choices for CPU development — the source paper leaves this table blank.
+# Load with: OCSIConfig.from_yaml("configs/default.yaml")
+
+memory:
+  appearance_ema_alpha: 0.9      # base (minimum) EMA weight on the appearance prototype
+  gallery_size: 30               # |G| bounded appearance gallery
+  queue_size: 30                 # |Q_tau|,|Q_v|,|Q_p|,|Q_c| temporal queues
+  confidence_init: 0.5           # q at creation
+  confidence_min: 0.0
+  confidence_max: 1.0
+  confidence_decay: 0.9          # delta on a reliable match: q <- clip(delta*q + (1-delta)*r)
+  confidence_decay_miss: 0.98    # per-missed-frame multiplicative decay (slow; aids reactivation)
+  gallery_reliability_min: 0.5   # only store embeddings at/above this reliability
+  min_hits: 3                    # hits before tentative -> confirmed
+  max_age: 30                    # frames a lost track is retained for reactivation
+  rollback_history: 3            # snapshots kept for contamination rollback
+  archive_on_expire: false       # archive (vs delete) expired records
+
+association:
+  w_app: 0.30                    # appearance similarity weight
+  w_motion: 0.20                 # motion (Mahalanobis) weight
+  w_iou: 0.20                    # IoU weight
+  w_memory: 0.20                 # memory-similarity weight
+  w_behaviour: 0.10              # behaviour weight (only when gated on)
+  use_memory: true               # ablation: false -> baseline (short-term appearance)
+  s_min: 0.30                    # reject assignments scoring below this
+  iou_gate: 0.10                 # minimum geometric plausibility
+  mahalanobis_gate: 9.4877       # chi-square 0.95 quantile, 4 dof
+  two_stage: true                # ByteTrack-style high- then low-confidence matching
+  high_conf_threshold: 0.50
+
+behaviour:
+  enabled: false                 # ablation flag: closed-loop feedback on/off
+  gate_enabled: true             # apply the confidence gate g; false -> g≡1 (ungated strawman)
+  theta_b: 0.60                  # activity-confidence threshold in the gate
+  tau_b: 30.0                    # gate temporal-decay constant (frames)
+  window: 16                     # temporal window length L for HAR
+  min_window: 8                  # minimum frames before HAR is attempted
+  contradiction_threshold: -0.20 # cos below which a match is vetoed
+  embedding_dim: 64
+  num_classes: 4
+
+perception:
+  detector_weights: "yolov8n.pt"
+  person_class_id: 0
+  det_conf_threshold: 0.30
+  reid_backbone: "resnet18"
+  reid_input_hw: [256, 128]      # (height, width) standard Re-ID crop
+  use_pose: false
+  pose_weights: "yolov8n-pose.pt"
