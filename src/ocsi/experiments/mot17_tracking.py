@@ -1,4 +1,4 @@
-"""Run OCSI on a MOT17 sequence with cacheable detector/Re-ID features.
+"""Run OCSI on MOT17 sequence(s) with cacheable detector/Re-ID features.
 
 MOT17 has pedestrian boxes and identities, but no action labels. This runner is
 therefore for contributions #1 and #2: memory-backed identity persistence and
@@ -13,6 +13,7 @@ Typical Colab usage::
         cache_dir="/content/drive/MyDrive/ocsi_cache/MOT17-02-FRCNN",
         output_dir="/content/ocsi_outputs",
         stages=("baseline", "memory"),
+        detection_source="public",
     )
 """
 from __future__ import annotations
@@ -20,14 +21,14 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
 from ..config import OCSIConfig, apply_ablation
 from ..eval.metrics import evaluate, rows_to_frames
 from ..eval.mot17 import mot_image_files
-from ..eval.mot_io import read_gt, tracker_rows, write_results
+from ..eval.mot_io import read_gt, read_results, tracker_rows, write_results
 from ..identity import OCSITracker
 from ..types import Detection
 
@@ -38,6 +39,14 @@ class MOT17StageResult:
     result_path: str
     metrics: Dict[str, float]
     summary: str
+
+
+def _seq_name(seq_dir: str) -> str:
+    return os.path.basename(os.path.normpath(seq_dir))
+
+
+def _cache_key(seq_dir: str, detection_source: str, frame_idx: int) -> str:
+    return f"{_seq_name(seq_dir)}/{detection_source}/{frame_idx + 1:06d}"
 
 
 def detections_to_array(detections: Sequence[Detection]) -> np.ndarray:
@@ -89,38 +98,66 @@ def array_to_detections(array: np.ndarray, frame_idx: int) -> List[Detection]:
     return dets
 
 
-def build_perception_cache(
+def mot17_public_detections(
     seq_dir: str,
-    cache_dir: str,
-    cfg: Optional[OCSIConfig] = None,
+    conf_threshold: float = 0.0,
     limit: Optional[int] = None,
 ) -> List[List[Detection]]:
-    """Detect people, attach embeddings, and persist one ``.npy`` per frame."""
+    """Read MOT17 ``det/det.txt`` into dense per-frame public detections.
+
+    MOT17 detection rows are MOTChallenge rows: ``frame,-1,x,y,w,h,conf,...``.
+    They do not include appearance embeddings; :func:`build_public_detection_cache`
+    attaches Re-ID features from the sequence images.
+    """
+    det_path = os.path.join(seq_dir, "det", "det.txt")
+    rows = read_results(det_path)
+    if limit is not None:
+        rows = [r for r in rows if int(r[0]) <= int(limit)]
+    if not rows:
+        return []
+    n_frames = max(int(r[0]) for r in rows)
+    per_frame: List[List[Detection]] = [[] for _ in range(n_frames)]
+    for row in rows:
+        frame_number = int(row[0])
+        conf = float(row[6]) if len(row) > 6 else 1.0
+        if conf < conf_threshold:
+            continue
+        tlwh = np.array([float(row[2]), float(row[3]), float(row[4]), float(row[5])])
+        per_frame[frame_number - 1].append(
+            Detection(tlwh=tlwh, confidence=conf, class_id=0, frame_idx=frame_number - 1)
+        )
+    return per_frame
+
+
+def _attach_embeddings_to_frames(
+    seq_dir: str,
+    cache_dir: str,
+    detections_for_frame: Callable[[int, str], Sequence[Detection]],
+    cfg: OCSIConfig,
+    detection_source: str,
+    limit: Optional[int],
+) -> List[List[Detection]]:
     try:
         import cv2
     except ImportError as exc:  # pragma: no cover
         raise ImportError("MOT17 perception cache needs opencv-python") from exc
     try:
-        from ..perception import FeatureCache, ReIDEmbedder, YOLODetector
+        from ..perception import FeatureCache, ReIDEmbedder
     except Exception as exc:  # pragma: no cover
         raise ImportError("MOT17 perception cache needs the perception extra") from exc
 
-    cfg = cfg or OCSIConfig()
     cache = FeatureCache(cache_dir)
-    detector = YOLODetector(cfg.perception)
     embedder = ReIDEmbedder(cfg.perception)
     frames = mot_image_files(seq_dir, limit)
-    seq_name = os.path.basename(os.path.normpath(seq_dir))
-
     detections_per_frame: List[List[Detection]] = []
     for frame_idx, path in enumerate(frames):
-        key = f"{seq_name}/{frame_idx + 1:06d}"
+        key = _cache_key(seq_dir, detection_source, frame_idx)
 
         def compute() -> np.ndarray:
             frame_bgr = cv2.imread(path)
             if frame_bgr is None:
                 raise FileNotFoundError(path)
-            dets = detector(frame_bgr, frame_idx=frame_idx)
+            dets = list(detections_for_frame(frame_idx, frame_bgr))
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             return detections_to_array(embedder.attach_embeddings(frame_rgb, dets))
 
@@ -129,16 +166,59 @@ def build_perception_cache(
     return detections_per_frame
 
 
-def load_cached_detections(seq_dir: str, cache_dir: str, limit: Optional[int] = None) -> List[List[Detection]]:
+def build_perception_cache(
+    seq_dir: str,
+    cache_dir: str,
+    cfg: Optional[OCSIConfig] = None,
+    limit: Optional[int] = None,
+) -> List[List[Detection]]:
+    """Run YOLO, attach embeddings, and persist one ``.npy`` per frame."""
+    try:
+        from ..perception import YOLODetector
+    except Exception as exc:  # pragma: no cover
+        raise ImportError("MOT17 perception cache needs the perception extra") from exc
+
+    cfg = cfg or OCSIConfig()
+    detector = YOLODetector(cfg.perception)
+
+    def detections_for_frame(frame_idx: int, frame_bgr: np.ndarray) -> Sequence[Detection]:
+        return detector(frame_bgr, frame_idx=frame_idx)
+
+    return _attach_embeddings_to_frames(seq_dir, cache_dir, detections_for_frame, cfg, "yolo", limit)
+
+
+def build_public_detection_cache(
+    seq_dir: str,
+    cache_dir: str,
+    cfg: Optional[OCSIConfig] = None,
+    limit: Optional[int] = None,
+    det_conf_threshold: float = 0.0,
+) -> List[List[Detection]]:
+    """Attach Re-ID embeddings to MOT17 public detections and cache them."""
+    cfg = cfg or OCSIConfig()
+    public = mot17_public_detections(seq_dir, det_conf_threshold, limit)
+
+    def detections_for_frame(frame_idx: int, frame_bgr: np.ndarray) -> Sequence[Detection]:
+        del frame_bgr
+        return public[frame_idx] if frame_idx < len(public) else []
+
+    return _attach_embeddings_to_frames(seq_dir, cache_dir, detections_for_frame, cfg, "public", limit)
+
+
+def load_cached_detections(
+    seq_dir: str,
+    cache_dir: str,
+    limit: Optional[int] = None,
+    detection_source: str = "yolo",
+) -> List[List[Detection]]:
     """Load cached detector/Re-ID outputs without importing perception models."""
     from ..perception.cache import FeatureCache
 
     cache = FeatureCache(cache_dir)
     frames = mot_image_files(seq_dir, limit)
-    seq_name = os.path.basename(os.path.normpath(seq_dir))
     out: List[List[Detection]] = []
     for frame_idx, _ in enumerate(frames):
-        key = f"{seq_name}/{frame_idx + 1:06d}"
+        key = _cache_key(seq_dir, detection_source, frame_idx)
         arr = cache.get(key)
         if arr is None:
             raise FileNotFoundError(f"missing cached detections for {key!r} in {cache_dir!r}")
@@ -168,22 +248,41 @@ def run_mot17_sequence(
     cfg: Optional[OCSIConfig] = None,
     limit: Optional[int] = None,
     rebuild_cache: bool = False,
+    detection_source: str = "yolo",
+    det_conf_threshold: Optional[float] = None,
+    seed: Optional[int] = None,
 ) -> Dict:
     """Build/load MOT17 perception cache, run ablations, and report metrics."""
     base_cfg = cfg or OCSIConfig()
+    if seed is not None:
+        np.random.seed(int(seed))
     os.makedirs(output_dir, exist_ok=True)
+    if det_conf_threshold is not None:
+        base_cfg = OCSIConfig.from_dict(base_cfg.to_dict())
+        base_cfg.perception.det_conf_threshold = float(det_conf_threshold)
+    if detection_source not in ("yolo", "public"):
+        raise ValueError("detection_source must be 'yolo' or 'public'")
+
     if rebuild_cache or not os.path.exists(cache_dir):
-        detections = build_perception_cache(seq_dir, cache_dir, base_cfg, limit)
+        if detection_source == "public":
+            detections = build_public_detection_cache(
+                seq_dir, cache_dir, base_cfg, limit, base_cfg.perception.det_conf_threshold
+            )
+        else:
+            detections = build_perception_cache(seq_dir, cache_dir, base_cfg, limit)
     else:
-        detections = load_cached_detections(seq_dir, cache_dir, limit)
+        detections = load_cached_detections(seq_dir, cache_dir, limit, detection_source)
 
     gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
-    seq_name = os.path.basename(os.path.normpath(seq_dir))
+    seq_name = _seq_name(seq_dir)
     results: List[MOT17StageResult] = []
     for stage in stages:
         stage_cfg = apply_ablation(base_cfg, stage)
         stage_cfg.behaviour.enabled = False
-        result_path = os.path.join(output_dir, f"{seq_name}-{stage}.txt")
+        suffix = f"{detection_source}-{stage}"
+        if seed is not None:
+            suffix = f"{suffix}-seed{int(seed)}"
+        result_path = os.path.join(output_dir, f"{seq_name}-{suffix}.txt")
         rows = track_cached_sequence(detections, stage_cfg, result_path)
         metrics = evaluate(gt, rows_to_frames(rows))
         results.append(
@@ -199,10 +298,57 @@ def run_mot17_sequence(
         "sequence": seq_name,
         "frames": len(detections),
         "cache_dir": cache_dir,
+        "detection_source": detection_source,
+        "seed": seed,
         "results": [asdict(r) for r in results],
         "note": "MOT17 has no action labels; behaviour feedback is evaluated separately.",
     }
-    with open(os.path.join(output_dir, f"{seq_name}-summary.json"), "w", encoding="utf-8") as fh:
+    summary_name = f"{seq_name}-{detection_source}-summary.json"
+    if seed is not None:
+        summary_name = f"{seq_name}-{detection_source}-seed{int(seed)}-summary.json"
+    with open(os.path.join(output_dir, summary_name), "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    return payload
+
+
+def run_mot17_dataset(
+    seq_dirs: Sequence[str],
+    cache_root: str,
+    output_dir: str,
+    stages: Sequence[str] = ("baseline", "memory", "feedback"),
+    cfg: Optional[OCSIConfig] = None,
+    limit: Optional[int] = None,
+    rebuild_cache: bool = False,
+    detection_source: str = "public",
+    seeds: Sequence[Optional[int]] = (None,),
+) -> Dict:
+    """Run a MOT17 ablation grid across sequences and seeds."""
+    runs = []
+    for seed in seeds:
+        for seq_dir in seq_dirs:
+            seq_name = _seq_name(seq_dir)
+            cache_dir = os.path.join(cache_root, seq_name)
+            runs.append(
+                run_mot17_sequence(
+                    seq_dir=seq_dir,
+                    cache_dir=cache_dir,
+                    output_dir=output_dir,
+                    stages=stages,
+                    cfg=cfg,
+                    limit=limit,
+                    rebuild_cache=rebuild_cache,
+                    detection_source=detection_source,
+                    seed=seed,
+                )
+            )
+    payload = {
+        "detection_source": detection_source,
+        "sequences": [_seq_name(s) for s in seq_dirs],
+        "seeds": list(seeds),
+        "runs": runs,
+    }
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, f"mot17-{detection_source}-dataset-summary.json"), "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     return payload
 

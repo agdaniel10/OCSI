@@ -59,6 +59,7 @@ payload = run_mot17_sequence(
     cache_dir="/content/drive/MyDrive/ocsi_cache/MOT17-02-FRCNN",
     output_dir="/content/ocsi_outputs",
     stages=("baseline", "memory"),
+    detection_source="public",  # use MOT17 det.txt; use "yolo" to regenerate detections
 )
 
 for result in payload["results"]:
@@ -69,6 +70,28 @@ for result in payload["results"]:
 The first run builds cached YOLO + Re-ID detections under `cache_dir`; later runs
 replay those cached features and only rerun the tracker/ablation logic. Use the
 written result files with TrackEval for HOTA/AssA/DetA.
+
+For a broader ablation pass:
+
+```python
+from ocsi.experiments import run_mot17_dataset
+
+payload = run_mot17_dataset(
+    seq_dirs=[
+        "/content/MOT17/train/MOT17-02-FRCNN",
+        "/content/MOT17/train/MOT17-04-FRCNN",
+    ],
+    cache_root="/content/drive/MyDrive/ocsi_cache",
+    output_dir="/content/ocsi_outputs",
+    stages=("baseline", "memory", "feedback"),
+    detection_source="public",
+    seeds=(1, 2, 3),
+)
+```
+
+The `feedback` stage is included for consistent ablation bookkeeping, but MOT17
+has no action labels; behaviour feedback remains a separate synthetic-gating
+experiment.
 
 ## Layout
 
