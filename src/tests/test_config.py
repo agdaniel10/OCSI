@@ -1,7 +1,7 @@
 """Tests for configuration loading and ablation presets."""
 import pytest
 
-from ocsi.config import OCSIConfig, apply_ablation
+from ocsi.config import OCSIConfig, apply_ablation, resolve_device
 
 
 def test_defaults():
@@ -47,3 +47,20 @@ def test_ablation_does_not_mutate_source():
 def test_ablation_invalid_stage():
     with pytest.raises(ValueError):
         apply_ablation(OCSIConfig(), "nonsense")
+
+
+def test_resolve_device_auto_prefers_cuda_when_available(monkeypatch):
+    monkeypatch.setattr("ocsi.config.cuda_available", lambda: True)
+    assert resolve_device("auto") == "cuda"
+    assert resolve_device("gpu") == "cuda"
+
+
+def test_resolve_device_auto_falls_back_to_cpu(monkeypatch):
+    monkeypatch.setattr("ocsi.config.cuda_available", lambda: False)
+    assert resolve_device("auto") == "cpu"
+
+
+def test_resolve_device_explicit_cuda_falls_back_with_warning(monkeypatch):
+    monkeypatch.setattr("ocsi.config.cuda_available", lambda: False)
+    with pytest.warns(RuntimeWarning, match="falling back to CPU"):
+        assert resolve_device("cuda:0") == "cpu"

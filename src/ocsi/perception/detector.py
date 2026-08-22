@@ -12,7 +12,7 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-from ..config import PerceptionConfig
+from ..config import PerceptionConfig, resolve_device
 from ..types import Detection
 
 
@@ -49,6 +49,7 @@ class YOLODetector:
 
     def __init__(self, cfg: Optional[PerceptionConfig] = None):
         self.cfg = cfg or PerceptionConfig()
+        self.device = resolve_device(self.cfg.device)
         try:
             from ultralytics import YOLO
         except ImportError as e:  # pragma: no cover - exercised only without the extra
@@ -64,7 +65,7 @@ class YOLODetector:
             frame_bgr,
             classes=[self.cfg.person_class_id],
             conf=self.cfg.det_conf_threshold,
-            device=self.cfg.device,
+            device=self.device,
             verbose=False,
         )[0]
         boxes = result.boxes
