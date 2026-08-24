@@ -43,9 +43,9 @@ behaviour:
   num_classes: 4
 
 perception:
-  detector_weights: "yolov8n.pt"
+  detector_weights: "yolov8s.pt"
   person_class_id: 0
-  det_conf_threshold: 0.30
+  det_conf_threshold: 0.15
   reid_backbone: "resnet18"
   reid_input_hw: [256, 128]      # (height, width) standard Re-ID crop
   use_pose: false

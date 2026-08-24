@@ -78,9 +78,9 @@ class BehaviourConfig:
 class PerceptionConfig:
     """Detector / Re-ID / pose adapters (Phase 1)."""
 
-    detector_weights: str = "yolov8n.pt"
+    detector_weights: str = "yolov8s.pt"
     person_class_id: int = 0
-    det_conf_threshold: float = 0.30
+    det_conf_threshold: float = 0.15
     reid_backbone: str = "resnet18"     # torchvision backbone; OSNet is an optional upgrade
     reid_input_hw: Tuple[int, int] = (256, 128)  # (height, width) standard Re-ID crop
     reid_pretrained: bool = True        # load ImageNet weights (needs a one-off download);
