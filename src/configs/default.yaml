@@ -30,6 +30,8 @@ association:
   mahalanobis_gate: 9.4877       # chi-square 0.95 quantile, 4 dof
   two_stage: true                # ByteTrack-style high- then low-confidence matching
   high_conf_threshold: 0.50
+  reactivation: true             # allow LOST tracks to re-associate by appearance after occlusion
+  reactivation_app_gate: 0.84     # min raw cosine; should sit above observed diff-ID range
 
 behaviour:
   enabled: false                 # ablation flag: closed-loop feedback on/off

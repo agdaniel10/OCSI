@@ -346,6 +346,30 @@ def embedding_diagnostics(
     return out
 
 
+def recommended_reactivation_gate(
+    diagnostics: Dict[str, object],
+    default_gate: float = 0.84,
+    diff_margin: float = 0.03,
+    same_margin: float = 0.02,
+) -> float:
+    """Choose a conservative lost-track appearance gate from embedding diagnostics.
+
+    The gate should sit above the diff-ID range, but still leave a little headroom
+    below the same-ID mean. If the observed gap is too narrow for both constraints,
+    prefer avoiding false reactivations and report the squeezed gate in the payload.
+    """
+    same = diagnostics.get("same_id_proto_cosine")
+    diff = diagnostics.get("different_id_proto_cosine")
+    gate = float(default_gate)
+    if diff is not None:
+        gate = max(gate, float(diff) + diff_margin)
+    if same is not None:
+        upper = float(same) - same_margin
+        if upper > 0.0:
+            gate = min(gate, upper)
+    return float(np.clip(gate, 0.0, 1.0))
+
+
 def run_mot17_sequence(
     seq_dir: str,
     cache_dir: str,
@@ -357,6 +381,7 @@ def run_mot17_sequence(
     detection_source: str = "yolo",
     det_conf_threshold: Optional[float] = None,
     seed: Optional[int] = None,
+    reactivation_app_gate: Optional[float] = None,
 ) -> Dict:
     """Build/load MOT17 perception cache, run ablations, and report metrics."""
     base_cfg = cfg or OCSIConfig()
@@ -381,10 +406,17 @@ def run_mot17_sequence(
 
     gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
     diagnostics = embedding_diagnostics(detections, gt)
+    applied_reactivation_app_gate = (
+        float(reactivation_app_gate)
+        if reactivation_app_gate is not None
+        else recommended_reactivation_gate(diagnostics, base_cfg.association.reactivation_app_gate)
+    )
+    diagnostics["recommended_reactivation_app_gate"] = applied_reactivation_app_gate
     seq_name = _seq_name(seq_dir)
     results: List[MOT17StageResult] = []
     for stage in stages:
         stage_cfg = apply_ablation(base_cfg, stage)
+        stage_cfg.association.reactivation_app_gate = applied_reactivation_app_gate
         stage_cfg.behaviour.enabled = False
         suffix = f"{detection_source}-{stage}"
         if seed is not None:
@@ -407,6 +439,7 @@ def run_mot17_sequence(
         "cache_dir": cache_dir,
         "detection_source": detection_source,
         "seed": seed,
+        "reactivation_app_gate": applied_reactivation_app_gate,
         "embedding_diagnostics": diagnostics,
         "results": [asdict(r) for r in results],
         "note": "MOT17 has no action labels; behaviour feedback is evaluated separately.",
@@ -429,6 +462,7 @@ def run_mot17_dataset(
     rebuild_cache: bool = False,
     detection_source: str = "public",
     seeds: Sequence[Optional[int]] = (None,),
+    reactivation_app_gate: Optional[float] = None,
 ) -> Dict:
     """Run a MOT17 ablation grid across sequences and seeds."""
     runs = []
@@ -447,6 +481,7 @@ def run_mot17_dataset(
                     rebuild_cache=rebuild_cache,
                     detection_source=detection_source,
                     seed=seed,
+                    reactivation_app_gate=reactivation_app_gate,
                 )
             )
     payload = {

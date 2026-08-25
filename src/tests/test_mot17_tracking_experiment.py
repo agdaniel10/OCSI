@@ -8,6 +8,7 @@ from ocsi.experiments.mot17_tracking import (
     embedding_diagnostics,
     load_cached_detections,
     mot17_public_detections,
+    recommended_reactivation_gate,
     run_mot17_dataset,
     run_mot17_sequence,
 )
@@ -86,6 +87,17 @@ def test_embedding_diagnostics_reports_identity_separation():
     assert diag["separation_margin"] > 0.97
 
 
+def test_recommended_reactivation_gate_stays_above_diff_id_range():
+    gate = recommended_reactivation_gate(
+        {
+            "same_id_proto_cosine": 0.92,
+            "different_id_proto_cosine": 0.80,
+        }
+    )
+
+    assert 0.83 <= gate <= 0.90
+
+
 def test_load_cached_detections_uses_mot_frame_numbered_keys(tmp_path):
     seq = _make_seq(tmp_path, n_frames=2)
     cache_dir = str(tmp_path / "cache")
@@ -121,6 +133,8 @@ def test_run_mot17_sequence_replays_cache_and_disables_behaviour(tmp_path):
 
     assert payload["note"].startswith("MOT17 has no action labels")
     assert payload["detection_source"] == "yolo"
+    assert payload["reactivation_app_gate"] == 0.84
+    assert payload["embedding_diagnostics"]["recommended_reactivation_app_gate"] == 0.84
     assert payload["results"][0]["stage"] == "memory"
     assert payload["results"][0]["metrics"]["num_gt"] == 4
 

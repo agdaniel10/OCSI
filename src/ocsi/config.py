@@ -54,8 +54,10 @@ class AssociationConfig:
     #                                     occlusion, bypassing the IoU floor (the memory bank's
     #                                     core value; paper §3.4 reactivation step). Ablated OFF
     #                                     in the 'baseline' stage so recovery gain is attributable.
-    reactivation_app_gate: float = 0.50  # min RAW cosine (-1..1) of a detection vs a lost track's
-    #                                      gallery to permit appearance-only reactivation
+    reactivation_app_gate: float = 0.84  # min RAW cosine (-1..1) of a detection vs a lost track's
+    #                                      gallery to permit appearance-only reactivation; tuned
+    #                                      above MOT17 diff-ID ranges observed with the default
+    #                                      ResNet-18 features, not below them
 
 
 @dataclass

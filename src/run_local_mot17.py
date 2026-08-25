@@ -7,6 +7,7 @@ payload = run_mot17_sequence(
     stages=("baseline", "memory", "feedback"),
     detection_source="public",
     det_conf_threshold=0.30,
+    reactivation_app_gate=0.84,
     rebuild_cache=True,  # belt-and-suspenders, forces fresh build regardless
 )
 
@@ -22,3 +23,4 @@ print("  mean norm:", f"{diag['mean_norm']:.3f}", "+/-", f"{diag['std_norm']:.3f
 print("  same-id cosine:", diag["same_id_proto_cosine"])
 print("  diff-id cosine:", diag["different_id_proto_cosine"])
 print("  separation margin:", diag["separation_margin"])
+print("  reactivation app gate:", payload["reactivation_app_gate"])
