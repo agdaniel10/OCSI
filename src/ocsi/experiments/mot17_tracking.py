@@ -24,11 +24,13 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from ..config import OCSIConfig, apply_ablation
 from ..eval.metrics import evaluate, rows_to_frames
 from ..eval.mot17 import mot_image_files
 from ..eval.mot_io import read_gt, read_results, tracker_rows, write_results
+from ..identity.similarity import cosine_matrix, iou_matrix
 from ..identity import OCSITracker
 from ..types import Detection
 
@@ -240,6 +242,110 @@ def track_cached_sequence(
     return rows
 
 
+def embedding_diagnostics(
+    detections_per_frame: Sequence[Sequence[Detection]],
+    gt: Dict[int, List],
+    iou_threshold: float = 0.5,
+    max_samples_per_id: int = 250,
+) -> Dict[str, object]:
+    """Estimate whether cached Re-ID features separate MOT ground-truth identities.
+
+    Public/Yolo detections do not carry identity labels, so this first assigns each
+    detection to the best same-frame GT box by IoU. It then compares each embedding to
+    its identity prototype and to other identity prototypes. If ``same`` and ``diff``
+    cosines are close, appearance memory cannot reliably support reactivation.
+    """
+    per_id: Dict[int, List[np.ndarray]] = {}
+    norms: List[float] = []
+    total_embeddings = 0
+    assigned_embeddings = 0
+
+    for frame_idx, detections in enumerate(detections_per_frame):
+        dets = [d for d in detections if d.embedding is not None and np.asarray(d.embedding).size]
+        if not dets:
+            continue
+        total_embeddings += len(dets)
+        for det in dets:
+            norms.append(float(np.linalg.norm(det.embedding)))
+
+        gt_items = gt.get(frame_idx + 1, [])
+        if not gt_items:
+            continue
+        gt_boxes = np.stack([box for _, box in gt_items]).astype(float)
+        det_boxes = np.stack([d.tlwh for d in dets]).astype(float)
+        gt_xyxy = gt_boxes.copy()
+        gt_xyxy[:, 2] = gt_boxes[:, 0] + gt_boxes[:, 2]
+        gt_xyxy[:, 3] = gt_boxes[:, 1] + gt_boxes[:, 3]
+        det_xyxy = det_boxes.copy()
+        det_xyxy[:, 2] = det_boxes[:, 0] + det_boxes[:, 2]
+        det_xyxy[:, 3] = det_boxes[:, 1] + det_boxes[:, 3]
+
+        iou = iou_matrix(gt_xyxy, det_xyxy)
+        rows, cols = linear_sum_assignment(-iou)
+        for r, c in zip(rows, cols):
+            if iou[r, c] < iou_threshold:
+                continue
+            emb = np.asarray(dets[c].embedding, dtype=float).reshape(-1)
+            norm = float(np.linalg.norm(emb))
+            if norm <= 1e-12:
+                continue
+            gid = int(gt_items[r][0])
+            bucket = per_id.setdefault(gid, [])
+            if len(bucket) < max_samples_per_id:
+                bucket.append(emb / norm)
+            assigned_embeddings += 1
+
+    usable = {gid: embs for gid, embs in per_id.items() if embs}
+    out: Dict[str, object] = {
+        "total_embeddings": total_embeddings,
+        "assigned_embeddings": assigned_embeddings,
+        "num_identity_prototypes": len(usable),
+        "embedding_dim": int(next(iter(usable.values()))[0].shape[0]) if usable else 0,
+        "mean_norm": float(np.mean(norms)) if norms else 0.0,
+        "std_norm": float(np.std(norms)) if norms else 0.0,
+    }
+    if len(usable) < 2:
+        out.update(
+            same_id_proto_cosine=None,
+            different_id_proto_cosine=None,
+            separation_margin=None,
+            note="Need embeddings assigned to at least two GT identities for separation diagnostics.",
+        )
+        return out
+
+    prototypes = {
+        gid: np.mean(np.stack(embs), axis=0)
+        for gid, embs in usable.items()
+    }
+    prototypes = {
+        gid: proto / max(float(np.linalg.norm(proto)), 1e-12)
+        for gid, proto in prototypes.items()
+    }
+
+    same, diff = [], []
+    proto_ids = sorted(prototypes)
+    proto_mat = np.stack([prototypes[gid] for gid in proto_ids])
+    for gid, embs in usable.items():
+        sims = cosine_matrix(np.stack(embs), proto_mat)
+        own_col = proto_ids.index(gid)
+        same.extend(float(v) for v in sims[:, own_col])
+        if len(proto_ids) > 1:
+            diff.extend(float(v) for v in np.delete(sims, own_col, axis=1).reshape(-1))
+
+    same_mean = float(np.mean(same)) if same else 0.0
+    diff_mean = float(np.mean(diff)) if diff else 0.0
+    out.update(
+        same_id_proto_cosine=same_mean,
+        different_id_proto_cosine=diff_mean,
+        separation_margin=same_mean - diff_mean,
+        note=(
+            "Healthy Re-ID has same-id cosine clearly above different-id cosine; "
+            "a small margin means memory/reactivation will be fragile."
+        ),
+    )
+    return out
+
+
 def run_mot17_sequence(
     seq_dir: str,
     cache_dir: str,
@@ -274,6 +380,7 @@ def run_mot17_sequence(
         detections = load_cached_detections(seq_dir, cache_dir, limit, detection_source)
 
     gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
+    diagnostics = embedding_diagnostics(detections, gt)
     seq_name = _seq_name(seq_dir)
     results: List[MOT17StageResult] = []
     for stage in stages:
@@ -300,6 +407,7 @@ def run_mot17_sequence(
         "cache_dir": cache_dir,
         "detection_source": detection_source,
         "seed": seed,
+        "embedding_diagnostics": diagnostics,
         "results": [asdict(r) for r in results],
         "note": "MOT17 has no action labels; behaviour feedback is evaluated separately.",
     }

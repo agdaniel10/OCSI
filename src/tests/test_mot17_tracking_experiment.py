@@ -5,6 +5,7 @@ from ocsi.config import OCSIConfig
 from ocsi.experiments.mot17_tracking import (
     array_to_detections,
     detections_to_array,
+    embedding_diagnostics,
     load_cached_detections,
     mot17_public_detections,
     run_mot17_dataset,
@@ -50,6 +51,39 @@ def test_detection_cache_roundtrip_preserves_frame_index():
     assert out[0].frame_idx == 7
     np.testing.assert_allclose(out[0].tlwh, dets[0].tlwh)
     np.testing.assert_allclose(out[0].embedding, dets[0].embedding)
+
+
+def test_embedding_diagnostics_reports_identity_separation():
+    detections = [
+        [
+            Detection([10, 20, 30, 40], 0.95, embedding=np.array([1.0, 0.0])),
+            Detection([100, 20, 30, 40], 0.95, embedding=np.array([0.0, 1.0])),
+        ],
+        [
+            Detection([11, 20, 30, 40], 0.95, embedding=np.array([0.99, 0.01])),
+            Detection([101, 20, 30, 40], 0.95, embedding=np.array([0.01, 0.99])),
+        ],
+    ]
+    gt = {
+        1: [
+            (1, np.array([10, 20, 30, 40], dtype=float)),
+            (2, np.array([100, 20, 30, 40], dtype=float)),
+        ],
+        2: [
+            (1, np.array([11, 20, 30, 40], dtype=float)),
+            (2, np.array([101, 20, 30, 40], dtype=float)),
+        ],
+    }
+
+    diag = embedding_diagnostics(detections, gt)
+
+    assert diag["total_embeddings"] == 4
+    assert diag["assigned_embeddings"] == 4
+    assert diag["num_identity_prototypes"] == 2
+    assert diag["embedding_dim"] == 2
+    assert diag["same_id_proto_cosine"] > 0.99
+    assert diag["different_id_proto_cosine"] < 0.02
+    assert diag["separation_margin"] > 0.97
 
 
 def test_load_cached_detections_uses_mot_frame_numbered_keys(tmp_path):
