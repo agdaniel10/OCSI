@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pdftotext -v)",
+      "Bash(pdftotext \"OCSI Journal Paper.pdf\" \"OCSI_paper_extracted.txt\")",
+      "Bash(pip list *)",
+      "Bash(pip --version)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pip show pytest)",
+      "Bash(python -m pip list)",
+      "Bash(python -m pip install pytest)",
+      "Bash(python -m pytest tests/test_metrics.py tests/test_pipeline.py -q)",
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest tests/test_embedder.py tests/test_feature_cache.py tests/test_detector.py -q)",
+      "Bash(python -m pytest tests/test_perception_pipeline.py -q)",
+      "Bash(python -)",
+      "Bash(python -m ocsi.experiments.occlusion_recovery)",
+      "Bash(python -m pytest tests/test_occlusion_recovery.py -q)",
+      "Bash(\"C:/Program Files/Python310/python.exe\" -m pytest -q)"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "result": {
+    "conflict_detected": true,
+    "rollback_applied": true,
+    "clean_appearance_cosine": 1.0,
+    "contaminated_appearance_cosine": 0.24253562503633297,
+    "recovered_appearance_cosine": 1.0,
+    "contaminated_behaviour_cosine": -1.0,
+    "recovered_behaviour_cosine": 1.0,
+    "clean_confidence": 0.92,
+    "contaminated_confidence": 0.984,
+    "recovered_confidence": 0.92,
+    "passed": true
+  },
+  "all_passed": true
+}
