@@ -1,9 +1,9 @@
 """Run OCSI on MOT17 sequence(s) with cacheable detector/Re-ID features.
 
-MOT17 has pedestrian boxes and identities, but no action labels. This runner is
-therefore for contributions #1 and #2: memory-backed identity persistence and
-unified association. Behaviour feedback (#3) remains covered by the synthetic
-gating experiment in :mod:`ocsi.experiments.behaviour_feedback`.
+MOT17 has pedestrian boxes and identities, but no action labels. This runner
+therefore uses a clearly marked placeholder behaviour recognizer for the
+``feedback`` ablation: it pools each track's recent Re-ID embeddings as a stand-in
+temporal feature so the confidence-gated feedback path is exercised end-to-end.
 
 Typical Colab usage::
 
@@ -18,20 +18,23 @@ Typical Colab usage::
 """
 from __future__ import annotations
 
+from collections import deque
 import json
 import os
 from dataclasses import asdict, dataclass
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Deque, Dict, List, Optional, Sequence
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from ..behaviour import PrototypeBehaviourRecognizer
 from ..config import OCSIConfig, apply_ablation
 from ..eval.metrics import evaluate, rows_to_frames
 from ..eval.mot17 import mot_image_files
 from ..eval.mot_io import read_gt, read_results, tracker_rows, write_results
 from ..identity.similarity import cosine_matrix, iou_matrix
 from ..identity import OCSITracker
+from ..memory import MemoryRecord
 from ..types import Detection
 
 
@@ -98,6 +101,24 @@ def array_to_detections(array: np.ndarray, frame_idx: int) -> List[Detection]:
             )
         )
     return dets
+
+
+def _clone_detection(det: Detection) -> Detection:
+    """Copy a cached detection so stage-local behaviour annotations cannot leak."""
+    return Detection(
+        tlwh=np.asarray(det.tlwh, dtype=float).copy(),
+        confidence=float(det.confidence),
+        class_id=int(det.class_id),
+        frame_idx=int(det.frame_idx),
+        embedding=None if det.embedding is None else np.asarray(det.embedding, dtype=float).copy(),
+        keypoints=None if det.keypoints is None else np.asarray(det.keypoints, dtype=float).copy(),
+        behaviour_embedding=None,
+        activity_probs=None,
+    )
+
+
+def _clone_frame_detections(detections: Sequence[Detection]) -> List[Detection]:
+    return [_clone_detection(det) for det in detections]
 
 
 def mot17_public_detections(
@@ -228,16 +249,182 @@ def load_cached_detections(
     return out
 
 
+def _first_embedding_dim(detections_per_frame: Sequence[Sequence[Detection]]) -> Optional[int]:
+    for detections in detections_per_frame:
+        for det in detections:
+            if det.embedding is not None:
+                return int(np.asarray(det.embedding).reshape(-1).shape[0])
+    return None
+
+
+def _sample_normalized_embeddings(
+    detections_per_frame: Sequence[Sequence[Detection]],
+    embedding_dim: int,
+    num_samples: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    embeddings = []
+    for detections in detections_per_frame:
+        for det in detections:
+            if det.embedding is None:
+                continue
+            emb = np.asarray(det.embedding, dtype=float).reshape(-1)
+            if emb.shape[0] != embedding_dim:
+                continue
+            norm = float(np.linalg.norm(emb))
+            if norm > 1e-12:
+                embeddings.append(emb / norm)
+
+    if not embeddings:
+        prototypes = rng.normal(size=(num_samples, embedding_dim))
+    else:
+        pool = np.stack(embeddings)
+        replace = len(pool) < num_samples
+        indices = rng.choice(len(pool), size=num_samples, replace=replace)
+        prototypes = pool[indices].copy()
+
+    norms = np.linalg.norm(prototypes, axis=1, keepdims=True)
+    return prototypes / np.maximum(norms, 1e-12)
+
+
+def _placeholder_behaviour_recognizer(
+    detections_per_frame: Sequence[Sequence[Detection]],
+    cfg: OCSIConfig,
+    seed: Optional[int],
+) -> Optional[PrototypeBehaviourRecognizer]:
+    """Build a deterministic placeholder recognizer sized to the Re-ID features."""
+    if not cfg.behaviour.enabled:
+        return None
+    embedding_dim = _first_embedding_dim(detections_per_frame)
+    if embedding_dim is None:
+        return None
+
+    rng = np.random.default_rng(0 if seed is None else int(seed))
+    # Placeholder only: MOT17 has no activity labels, so sampled Re-ID embeddings
+    # stand in for activity prototypes until a trained HAR model is plugged in.
+    prototypes = _sample_normalized_embeddings(
+        detections_per_frame,
+        embedding_dim,
+        int(cfg.behaviour.num_classes),
+        rng,
+    )
+    return PrototypeBehaviourRecognizer(
+        prototypes=prototypes,
+        min_window=cfg.behaviour.min_window,
+    )
+
+
+def _tlwh_iou_matrix(track_boxes: Sequence[np.ndarray], detections: Sequence[Detection]) -> np.ndarray:
+    if not track_boxes or not detections:
+        return np.zeros((len(track_boxes), len(detections)), dtype=float)
+    track_xyxy = np.stack([np.asarray(box, dtype=float).copy() for box in track_boxes])
+    track_xyxy[:, 2] = track_xyxy[:, 0] + track_xyxy[:, 2]
+    track_xyxy[:, 3] = track_xyxy[:, 1] + track_xyxy[:, 3]
+    det_tlwh = np.stack([np.asarray(det.tlwh, dtype=float).copy() for det in detections])
+    det_xyxy = det_tlwh.copy()
+    det_xyxy[:, 2] = det_tlwh[:, 0] + det_tlwh[:, 2]
+    det_xyxy[:, 3] = det_tlwh[:, 1] + det_tlwh[:, 3]
+    return iou_matrix(track_xyxy, det_xyxy)
+
+
+def _assign_detections_to_tracks(
+    tracks: Sequence[MemoryRecord],
+    detections: Sequence[Detection],
+    iou_threshold: float = 0.1,
+) -> Dict[int, int]:
+    """Associate experiment-side track records with frame detections by box overlap."""
+    if not tracks or not detections:
+        return {}
+    iou = _tlwh_iou_matrix([track.last_box for track in tracks], detections)
+    rows, cols = linear_sum_assignment(-iou)
+    out: Dict[int, int] = {}
+    for row, col in zip(rows, cols):
+        if iou[row, col] >= iou_threshold:
+            out[int(tracks[row].track_id)] = int(col)
+    return out
+
+
+def _attach_behaviour_observations(
+    tracker: OCSITracker,
+    detections: Sequence[Detection],
+    windows: Dict[int, Deque[np.ndarray]],
+    recognizer: Optional[PrototypeBehaviourRecognizer],
+) -> None:
+    if recognizer is None or not detections:
+        return
+
+    candidates = [
+        track
+        for track in tracker.bank.matchable()
+        if track.track_id in windows and len(windows[track.track_id]) >= recognizer.min_window
+    ]
+    assignments = _assign_detections_to_tracks(candidates, detections)
+    for track in candidates:
+        det_idx = assignments.get(track.track_id)
+        if det_idx is None:
+            continue
+        observation = recognizer.observe(windows[track.track_id])
+        if observation is None:
+            continue
+        detections[det_idx].activity_probs = observation.probs
+        detections[det_idx].behaviour_embedding = observation.embedding
+
+    for det in detections:
+        if det.activity_probs is not None and det.behaviour_embedding is not None:
+            continue
+        # The tracker consumes behaviour cues as a dense per-frame matrix. Detections
+        # without a full per-track window get an explicit low-confidence placeholder:
+        # the gate remains closed for them, so they cannot affect association or
+        # update a behaviour prototype.
+        det.activity_probs = np.full(recognizer.num_classes, 1.0 / recognizer.num_classes)
+        if det.embedding is None:
+            det.behaviour_embedding = np.zeros(recognizer.embedding_dim, dtype=float)
+        else:
+            emb = np.asarray(det.embedding, dtype=float).reshape(-1)
+            norm = float(np.linalg.norm(emb))
+            det.behaviour_embedding = emb / norm if norm > 1e-12 else emb
+
+
+def _update_behaviour_windows(
+    updated_tracks: Sequence[MemoryRecord],
+    detections: Sequence[Detection],
+    windows: Dict[int, Deque[np.ndarray]],
+    max_window: int,
+) -> None:
+    if not updated_tracks or not detections:
+        return
+    assignments = _assign_detections_to_tracks(updated_tracks, detections)
+    for track in updated_tracks:
+        det_idx = assignments.get(track.track_id)
+        if det_idx is None:
+            continue
+        embedding = detections[det_idx].embedding
+        if embedding is None:
+            continue
+        window = windows.setdefault(track.track_id, deque(maxlen=max_window))
+        # MOT17 has no action signal. Re-ID embeddings are used here only as a
+        # temporary per-frame feature to validate behaviour-feedback plumbing.
+        window.append(np.asarray(embedding, dtype=float).reshape(-1).copy())
+
+
 def track_cached_sequence(
     detections_per_frame: Sequence[Sequence[Detection]],
     cfg: OCSIConfig,
     output_path: str,
+    behaviour_seed: Optional[int] = None,
 ) -> List:
     """Replay cached detections through the tracker and write MOT results."""
     tracker = OCSITracker(cfg)
+    recognizer = _placeholder_behaviour_recognizer(detections_per_frame, cfg, behaviour_seed)
+    behaviour_windows: Dict[int, Deque[np.ndarray]] = {}
+    max_window = int(cfg.behaviour.min_window)
     rows = []
     for frame_idx, detections in enumerate(detections_per_frame):
-        rows.extend(tracker_rows(frame_idx, tracker.update(list(detections))))
+        frame_detections = _clone_frame_detections(detections)
+        _attach_behaviour_observations(tracker, frame_detections, behaviour_windows, recognizer)
+        updated_tracks = tracker.update(frame_detections)
+        _update_behaviour_windows(updated_tracks, frame_detections, behaviour_windows, max_window)
+        rows.extend(tracker_rows(frame_idx, updated_tracks))
     write_results(output_path, rows)
     return rows
 
@@ -417,12 +604,11 @@ def run_mot17_sequence(
     for stage in stages:
         stage_cfg = apply_ablation(base_cfg, stage)
         stage_cfg.association.reactivation_app_gate = applied_reactivation_app_gate
-        stage_cfg.behaviour.enabled = False
         suffix = f"{detection_source}-{stage}"
         if seed is not None:
             suffix = f"{suffix}-seed{int(seed)}"
         result_path = os.path.join(output_dir, f"{seq_name}-{suffix}.txt")
-        rows = track_cached_sequence(detections, stage_cfg, result_path)
+        rows = track_cached_sequence(detections, stage_cfg, result_path, behaviour_seed=seed)
         metrics = evaluate(gt, rows_to_frames(rows))
         results.append(
             MOT17StageResult(
@@ -442,7 +628,10 @@ def run_mot17_sequence(
         "reactivation_app_gate": applied_reactivation_app_gate,
         "embedding_diagnostics": diagnostics,
         "results": [asdict(r) for r in results],
-        "note": "MOT17 has no action labels; behaviour feedback is evaluated separately.",
+        "note": (
+            "MOT17 has no action labels; feedback uses placeholder activity prototypes over "
+            "rolling Re-ID embeddings to exercise the behaviour gate plumbing."
+        ),
     }
     summary_name = f"{seq_name}-{detection_source}-summary.json"
     if seed is not None:

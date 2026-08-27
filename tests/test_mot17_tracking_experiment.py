@@ -12,6 +12,7 @@ from ocsi.experiments.mot17_tracking import (
     run_mot17_dataset,
     run_mot17_sequence,
 )
+from ocsi.experiments import mot17_tracking
 from ocsi.perception.cache import FeatureCache
 from ocsi.types import Detection
 
@@ -137,6 +138,33 @@ def test_run_mot17_sequence_replays_cache_and_disables_behaviour(tmp_path):
     assert payload["embedding_diagnostics"]["recommended_reactivation_app_gate"] == 0.84
     assert payload["results"][0]["stage"] == "memory"
     assert payload["results"][0]["metrics"]["num_gt"] == 4
+
+
+def test_run_mot17_sequence_keeps_feedback_behaviour_enabled(tmp_path, monkeypatch):
+    seq = _make_seq(tmp_path, n_frames=1)
+    cache_dir = str(tmp_path / "cache")
+    cache = FeatureCache(cache_dir)
+    cache.put(
+        "MOT17-02-FRCNN/yolo/000001",
+        detections_to_array([Detection([11, 20, 30, 40], 0.95, embedding=np.array([1.0, 0.0]))]),
+    )
+    seen = []
+
+    def fake_track_cached_sequence(detections, cfg, output_path, behaviour_seed=None):
+        seen.append((cfg.behaviour.enabled, behaviour_seed))
+        return []
+
+    monkeypatch.setattr(mot17_tracking, "track_cached_sequence", fake_track_cached_sequence)
+
+    run_mot17_sequence(
+        str(seq),
+        cache_dir,
+        str(tmp_path / "out"),
+        stages=("memory", "feedback"),
+        seed=7,
+    )
+
+    assert seen == [(False, 7), (True, 7)]
 
 
 def test_mot17_public_detections_reads_det_txt_and_filters_confidence(tmp_path):
