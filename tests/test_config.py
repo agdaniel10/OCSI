@@ -32,10 +32,16 @@ def test_dict_roundtrip():
 def test_ablation_stages():
     base = apply_ablation(OCSIConfig(), "baseline")
     assert base.association.use_memory is False and base.behaviour.enabled is False
+    assert base.association.reactivation is False and base.association.adaptive_reactivation is False
     mem = apply_ablation(OCSIConfig(), "memory")
     assert mem.association.use_memory is True and mem.behaviour.enabled is False
+    assert mem.association.reactivation is True and mem.association.adaptive_reactivation is False
+    adaptive = apply_ablation(OCSIConfig(), "adaptive_memory")
+    assert adaptive.association.use_memory is True and adaptive.behaviour.enabled is False
+    assert adaptive.association.reactivation is True and adaptive.association.adaptive_reactivation is True
     fb = apply_ablation(OCSIConfig(), "feedback")
     assert fb.association.use_memory is True and fb.behaviour.enabled is True
+    assert fb.association.reactivation is True and fb.association.adaptive_reactivation is False
 
 
 def test_ablation_does_not_mutate_source():

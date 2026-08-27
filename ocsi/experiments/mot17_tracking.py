@@ -593,28 +593,39 @@ def run_mot17_sequence(
 
     gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
     diagnostics = embedding_diagnostics(detections, gt)
-    applied_reactivation_app_gate = (
+    recommended_gate = recommended_reactivation_gate(
+        diagnostics,
+        base_cfg.association.reactivation_app_gate,
+        diff_margin=base_cfg.association.adaptive_diff_margin,
+        same_margin=base_cfg.association.adaptive_same_margin,
+    )
+    fixed_gate = (
         float(reactivation_app_gate)
         if reactivation_app_gate is not None
-        else recommended_reactivation_gate(diagnostics, base_cfg.association.reactivation_app_gate)
+        else float(base_cfg.association.reactivation_app_gate)
     )
-    diagnostics["recommended_reactivation_app_gate"] = applied_reactivation_app_gate
+    diagnostics["recommended_reactivation_app_gate"] = recommended_gate
     seq_name = _seq_name(seq_dir)
     results: List[MOT17StageResult] = []
     for stage in stages:
         stage_cfg = apply_ablation(base_cfg, stage)
-        stage_cfg.association.reactivation_app_gate = applied_reactivation_app_gate
+        stage_cfg.association.reactivation_app_gate = (
+            recommended_gate if stage_cfg.association.adaptive_reactivation else fixed_gate
+        )
         suffix = f"{detection_source}-{stage}"
         if seed is not None:
             suffix = f"{suffix}-seed{int(seed)}"
         result_path = os.path.join(output_dir, f"{seq_name}-{suffix}.txt")
         rows = track_cached_sequence(detections, stage_cfg, result_path, behaviour_seed=seed)
         metrics = evaluate(gt, rows_to_frames(rows))
+        metric_payload = metrics.as_dict()
+        metric_payload["reactivation_app_gate"] = stage_cfg.association.reactivation_app_gate
+        metric_payload["adaptive_reactivation"] = stage_cfg.association.adaptive_reactivation
         results.append(
             MOT17StageResult(
                 stage=stage,
                 result_path=result_path,
-                metrics=metrics.as_dict(),
+                metrics=metric_payload,
                 summary=metrics.summary(),
             )
         )
@@ -625,7 +636,8 @@ def run_mot17_sequence(
         "cache_dir": cache_dir,
         "detection_source": detection_source,
         "seed": seed,
-        "reactivation_app_gate": applied_reactivation_app_gate,
+        "reactivation_app_gate": fixed_gate,
+        "recommended_reactivation_app_gate": recommended_gate,
         "embedding_diagnostics": diagnostics,
         "results": [asdict(r) for r in results],
         "note": (

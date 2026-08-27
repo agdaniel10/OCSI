@@ -8,6 +8,7 @@ from .mot_io import (
     tracker_rows,
     write_results,
 )
+from .statistics import bootstrap_mean_ci, choose_threshold_from_similarity, paired_stats
 
 __all__ = [
     "format_row",
@@ -21,4 +22,7 @@ __all__ = [
     "MOTMetrics",
     "evaluate",
     "rows_to_frames",
+    "bootstrap_mean_ci",
+    "choose_threshold_from_similarity",
+    "paired_stats",
 ]

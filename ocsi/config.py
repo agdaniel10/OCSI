@@ -58,6 +58,12 @@ class AssociationConfig:
     #                                      gallery to permit appearance-only reactivation; tuned
     #                                      above MOT17 diff-ID ranges observed with the default
     #                                      ResNet-18 features, not below them
+    adaptive_reactivation: bool = False   # estimate a sequence-specific reactivation gate from
+    #                                      held-out/cached embedding diagnostics instead of using
+    #                                      the fixed global gate
+    adaptive_diff_margin: float = 0.03    # keep the gate above observed different-ID similarity
+    adaptive_same_margin: float = 0.02    # keep the gate below observed same-ID similarity when
+    #                                      the embedding separation allows it
 
 
 @dataclass
@@ -172,7 +178,7 @@ def resolve_device(device: str = "auto") -> str:
 
 # --- ablation presets: baseline -> +memory -> +behaviour feedback (paper §6.4, Table 7) ---
 
-ABLATION_STAGES = ("baseline", "memory", "feedback")
+ABLATION_STAGES = ("baseline", "memory", "adaptive_memory", "feedback")
 
 
 def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
@@ -180,6 +186,7 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
 
     - ``baseline``  : short-term appearance only, no memory term, no behaviour.
     - ``memory``    : add the Object Memory Bank memory-similarity term.
+    - ``adaptive_memory`` : memory with a data-calibrated reactivation gate.
     - ``feedback``  : add confidence-gated behaviour feedback (full OCSI).
     """
     if stage not in ABLATION_STAGES:
@@ -188,13 +195,21 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
     if stage == "baseline":
         cfg.association.use_memory = False
         cfg.association.reactivation = False   # no appearance rescue: motion/IoU association only
+        cfg.association.adaptive_reactivation = False
         cfg.behaviour.enabled = False
     elif stage == "memory":
         cfg.association.use_memory = True
         cfg.association.reactivation = True    # memory bank persists identity across occlusion
+        cfg.association.adaptive_reactivation = False
+        cfg.behaviour.enabled = False
+    elif stage == "adaptive_memory":
+        cfg.association.use_memory = True
+        cfg.association.reactivation = True
+        cfg.association.adaptive_reactivation = True
         cfg.behaviour.enabled = False
     elif stage == "feedback":
         cfg.association.use_memory = True
         cfg.association.reactivation = True
+        cfg.association.adaptive_reactivation = False
         cfg.behaviour.enabled = True
     return cfg
