@@ -134,6 +134,11 @@ for run in mot17_payload["runs"]:
 # =============================================================================
 from ocsi.experiments.mot20 import run_mot20_sequence
 
+# IMPORTANT: MOT20 public detections have a much lower confidence distribution
+# than MOT17. A threshold of 0.30 discards almost everything (recall drops to
+# <1% on dense sequences). Use a very low threshold for MOT20.
+MOT20_DET_CONF = 0.0   # keep ALL public detections
+
 mot20_seqs = sorted([
     os.path.join(MOT20_ROOT, d)
     for d in os.listdir(MOT20_ROOT)
@@ -148,13 +153,14 @@ for seq_dir in mot20_seqs:
     try:
         payload = run_mot20_sequence(
             seq_dir=seq_dir,
-            cache_dir=os.path.join(CACHE_ROOT, f"mot20_{seq_name}"),
+            cache_dir=os.path.join(CACHE_ROOT, f"mot20_{seq_name}_conf{MOT20_DET_CONF:.2f}"),
             output_dir=os.path.join(OUTPUT_DIR, "mot20"),
             stages=("baseline", "memory"),
             detection_source="public",
-            det_conf_threshold=DET_CONF,
+            det_conf_threshold=MOT20_DET_CONF,
             seed=0,
             reactivation_app_gate=REACT_GATE,
+            rebuild_cache=True,  # force rebuild with new threshold
         )
         mot20_results.append(payload)
         for result in payload["results"]:

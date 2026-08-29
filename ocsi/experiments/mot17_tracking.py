@@ -50,8 +50,16 @@ def _seq_name(seq_dir: str) -> str:
     return os.path.basename(os.path.normpath(seq_dir))
 
 
-def _cache_key(seq_dir: str, detection_source: str, frame_idx: int) -> str:
-    return f"{_seq_name(seq_dir)}/{detection_source}/{frame_idx + 1:06d}"
+def _cache_key(
+    seq_dir: str,
+    detection_source: str,
+    frame_idx: int,
+    det_conf_threshold: float = 0.0,
+) -> str:
+    """Cache key that includes the detection confidence threshold so that
+    changing the threshold forces a cache rebuild (prevents stale detections)."""
+    conf_tag = f"conf{det_conf_threshold:.2f}" if det_conf_threshold > 0 else "conf0"
+    return f"{_seq_name(seq_dir)}/{detection_source}/{conf_tag}/{frame_idx + 1:06d}"
 
 
 def detections_to_array(detections: Sequence[Detection]) -> np.ndarray:
@@ -160,6 +168,7 @@ def _attach_embeddings_to_frames(
     cfg: OCSIConfig,
     detection_source: str,
     limit: Optional[int],
+    det_conf_threshold: float = 0.0,
 ) -> List[List[Detection]]:
     try:
         import cv2
@@ -175,7 +184,7 @@ def _attach_embeddings_to_frames(
     frames = mot_image_files(seq_dir, limit)
     detections_per_frame: List[List[Detection]] = []
     for frame_idx, path in enumerate(frames):
-        key = _cache_key(seq_dir, detection_source, frame_idx)
+        key = _cache_key(seq_dir, detection_source, frame_idx, det_conf_threshold)
 
         def compute() -> np.ndarray:
             frame_bgr = cv2.imread(path)
@@ -226,7 +235,9 @@ def build_public_detection_cache(
         del frame_bgr
         return public[frame_idx] if frame_idx < len(public) else []
 
-    return _attach_embeddings_to_frames(seq_dir, cache_dir, detections_for_frame, cfg, "public", limit)
+    return _attach_embeddings_to_frames(
+        seq_dir, cache_dir, detections_for_frame, cfg, "public", limit, det_conf_threshold
+    )
 
 
 def load_cached_detections(
@@ -234,6 +245,7 @@ def load_cached_detections(
     cache_dir: str,
     limit: Optional[int] = None,
     detection_source: str = "yolo",
+    det_conf_threshold: float = 0.0,
 ) -> List[List[Detection]]:
     """Load cached detector/Re-ID outputs without importing perception models."""
     from ..perception.cache import FeatureCache
@@ -242,7 +254,7 @@ def load_cached_detections(
     frames = mot_image_files(seq_dir, limit)
     out: List[List[Detection]] = []
     for frame_idx, _ in enumerate(frames):
-        key = _cache_key(seq_dir, detection_source, frame_idx)
+        key = _cache_key(seq_dir, detection_source, frame_idx, det_conf_threshold)
         arr = cache.get(key)
         if arr is None:
             raise FileNotFoundError(f"missing cached detections for {key!r} in {cache_dir!r}")
@@ -611,7 +623,9 @@ def run_mot17_sequence(
         else:
             detections = build_perception_cache(seq_dir, cache_dir, base_cfg, limit)
     else:
-        detections = load_cached_detections(seq_dir, cache_dir, limit, detection_source)
+        detections = load_cached_detections(
+            seq_dir, cache_dir, limit, detection_source, base_cfg.perception.det_conf_threshold
+        )
 
     gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
     diagnostics = embedding_diagnostics(detections, gt)
@@ -739,7 +753,10 @@ def run_mot17_dataset(
                 else:
                     detections = build_perception_cache(seq_dir, seq_cache, cfg or OCSIConfig(), limit)
             else:
-                detections = load_cached_detections(seq_dir, seq_cache, limit, detection_source)
+                detections = load_cached_detections(
+                    seq_dir, seq_cache, limit, detection_source,
+                    (cfg or OCSIConfig()).perception.det_conf_threshold,
+                )
             gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
             diag = embedding_diagnostics(detections, gt)
             gate = recommended_reactivation_gate(

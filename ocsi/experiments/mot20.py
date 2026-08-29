@@ -75,7 +75,9 @@ def build_mot20_public_detection_cache(
         del frame_bgr
         return public[frame_idx] if frame_idx < len(public) else []
 
-    return _attach_embeddings_to_frames(seq_dir, cache_dir, detections_for_frame, cfg, "public", limit)
+    return _attach_embeddings_to_frames(
+        seq_dir, cache_dir, detections_for_frame, cfg, "public", limit, det_conf_threshold
+    )
 
 
 def run_mot20_sequence(
@@ -110,7 +112,9 @@ def run_mot20_sequence(
         else:
             detections = build_perception_cache(seq_dir, cache_dir, base_cfg, limit)
     else:
-        detections = load_cached_detections(seq_dir, cache_dir, limit, detection_source)
+        detections = load_cached_detections(
+            seq_dir, cache_dir, limit, detection_source, base_cfg.perception.det_conf_threshold
+        )
 
     # Reuse the MOT17 sequence runner with the pre-built detections
     # (we can't pass detections directly, so we call run_mot17_sequence with

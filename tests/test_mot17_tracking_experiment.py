@@ -103,8 +103,8 @@ def test_load_cached_detections_uses_mot_frame_numbered_keys(tmp_path):
     seq = _make_seq(tmp_path, n_frames=2)
     cache_dir = str(tmp_path / "cache")
     cache = FeatureCache(cache_dir)
-    cache.put("MOT17-02-FRCNN/yolo/000001", detections_to_array([Detection([1, 2, 3, 4], 0.9)]))
-    cache.put("MOT17-02-FRCNN/yolo/000002", detections_to_array([Detection([5, 6, 7, 8], 0.8)]))
+    cache.put("MOT17-02-FRCNN/yolo/conf0/000001", detections_to_array([Detection([1, 2, 3, 4], 0.9)]))
+    cache.put("MOT17-02-FRCNN/yolo/conf0/000002", detections_to_array([Detection([5, 6, 7, 8], 0.8)]))
 
     dets = load_cached_detections(str(seq), cache_dir)
 
@@ -119,7 +119,7 @@ def test_run_mot17_sequence_replays_cache_and_disables_behaviour(tmp_path):
     emb = np.array([1.0, 0.0], dtype=np.float32)
     for i in range(1, 5):
         det = Detection([10 + i, 20, 30, 40], 0.95, embedding=emb)
-        cache.put(f"MOT17-02-FRCNN/yolo/{i:06d}", detections_to_array([det]))
+        cache.put(f"MOT17-02-FRCNN/yolo/conf0.15/{i:06d}", detections_to_array([det]))
 
     cfg = OCSIConfig()
     cfg.memory.min_hits = 1
@@ -145,7 +145,7 @@ def test_run_mot17_sequence_keeps_feedback_behaviour_enabled(tmp_path, monkeypat
     cache_dir = str(tmp_path / "cache")
     cache = FeatureCache(cache_dir)
     cache.put(
-        "MOT17-02-FRCNN/yolo/000001",
+        "MOT17-02-FRCNN/yolo/conf0.15/000001",
         detections_to_array([Detection([11, 20, 30, 40], 0.95, embedding=np.array([1.0, 0.0]))]),
     )
     seen = []
@@ -191,7 +191,7 @@ def test_run_mot17_dataset_scales_sequences_and_seeds_from_public_cache(tmp_path
         cache = FeatureCache(str(cache_root / seq.name))
         for i in range(1, 3):
             det = Detection([10 + i, 20, 30, 40], 0.95, embedding=emb)
-            cache.put(f"{seq.name}/public/{i:06d}", detections_to_array([det]))
+            cache.put(f"{seq.name}/public/conf0.15/{i:06d}", detections_to_array([det]))
 
     payload = run_mot17_dataset(
         [str(seq_a), str(seq_b)],
