@@ -1,14 +1,16 @@
 """Re-ID appearance embedder (Phase 1).
 
-Wraps a torchvision CNN backbone (default ResNet-18) as a person-appearance
-feature extractor: crop each detection box, resize to the standard Re-ID aspect
-ratio, ImageNet-normalise, run the backbone and L2-normalise the pooled feature.
-The resulting ``(d,)`` vectors are what populate a track's appearance gallery and
-long-term prototype ``ā`` — i.e. they are the signal the memory-similarity cue
-(paper §4.2) needs in order to beat the geometry-only baseline.
+Supports two appearance backends:
 
-torch/torchvision are imported lazily inside the constructor so that importing
-:mod:`ocsi.perception` (and the model-free core) never requires them.
+* ``torchvision`` for the original ImageNet-pretrained control runs;
+* ``torchreid`` for publication-grade person-ReID models such as OSNet.
+
+Both paths crop each detection box, resize to the standard Re-ID aspect ratio,
+ImageNet-normalise, run the backbone and L2-normalise the pooled feature. The
+resulting vectors populate a track's appearance gallery and long-term prototype.
+
+torch/torchvision/torchreid are imported lazily inside the constructor so that
+importing :mod:`ocsi.perception` and the model-free core remains dependency-light.
 """
 from __future__ import annotations
 
@@ -35,13 +37,27 @@ class ReIDEmbedder:
 
     def __init__(self, cfg: Optional[PerceptionConfig] = None):
         import torch
-        from torchvision import models
 
         self.cfg = cfg or PerceptionConfig()
         self._torch = torch
         self.device_name = resolve_device(self.cfg.device)
         self.device = torch.device(self.device_name)
         self.input_hw = tuple(self.cfg.reid_input_hw)
+        self.backend = (self.cfg.reid_backend or "torchvision").strip().lower()
+        self.backend_name = f"{self.backend}:{self.cfg.reid_backbone}"
+
+        if self.backend == "torchvision":
+            self.model = self._build_torchvision_model()
+        elif self.backend == "torchreid":
+            self.model = self._build_torchreid_model()
+        else:
+            raise ValueError("reid_backend must be 'torchvision' or 'torchreid'")
+
+        self.model.to(self.device).eval()
+        self.dim = self._infer_dim()
+
+    def _build_torchvision_model(self):
+        from torchvision import models
 
         weights = "DEFAULT" if self.cfg.reid_pretrained else None
         try:
@@ -59,12 +75,51 @@ class ReIDEmbedder:
             backbone = getattr(models, self.cfg.reid_backbone)(weights=None)
 
         # drop the classification head; keep the global-pooled feature
-        self.model = torch.nn.Sequential(*list(backbone.children())[:-1])
-        self.model.to(self.device).eval()
+        return self._torch.nn.Sequential(*list(backbone.children())[:-1])
 
+    def _build_torchreid_model(self):
+        try:
+            import torchreid
+        except ImportError as exc:
+            raise ImportError(
+                "torchreid backend requested; install it with "
+                "`pip install torchreid` or `pip install -e '.[q1-reid]'`"
+            ) from exc
+
+        try:
+            return torchreid.models.build_model(
+                name=self.cfg.reid_backbone,
+                num_classes=1000,
+                loss="softmax",
+                pretrained=bool(self.cfg.reid_pretrained),
+            )
+        except Exception as exc:
+            if not self.cfg.reid_pretrained:
+                raise
+            warnings.warn(
+                f"torchreid pretrained model unavailable ({exc}); falling back to random init. "
+                "Metrics will be unsuitable for publication until real person-ReID weights load.",
+                RuntimeWarning,
+            )
+            return torchreid.models.build_model(
+                name=self.cfg.reid_backbone,
+                num_classes=1000,
+                loss="softmax",
+                pretrained=False,
+            )
+
+    def _forward_features(self, batch):
+        with self._torch.no_grad():
+            out = self.model(batch)
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        return out.reshape(batch.shape[0], -1)
+
+    def _infer_dim(self) -> int:
+        torch = self._torch
         with torch.no_grad():
             dummy = torch.zeros(1, 3, self.input_hw[0], self.input_hw[1], device=self.device)
-            self.dim = int(self.model(dummy).reshape(1, -1).shape[1])
+            return int(self._forward_features(dummy).shape[1])
 
     # ------------------------------------------------------------------ crops
     def _crop_chw(self, frame_rgb: np.ndarray, tlwh: np.ndarray) -> np.ndarray:
@@ -94,11 +149,10 @@ class ReIDEmbedder:
         crops = [self._crop_chw(frame_rgb, b) for b in boxes]
         bs = max(int(self.cfg.reid_batch_size), 1)
         feats: List[np.ndarray] = []
-        with torch.no_grad():
-            for i in range(0, len(crops), bs):
-                batch = torch.from_numpy(np.stack(crops[i:i + bs])).to(self.device)
-                out = self.model(batch).reshape(batch.shape[0], -1)
-                feats.append(out.cpu().numpy())
+        for i in range(0, len(crops), bs):
+            batch = torch.from_numpy(np.stack(crops[i:i + bs])).to(self.device)
+            out = self._forward_features(batch)
+            feats.append(out.cpu().numpy())
         feats_arr = np.concatenate(feats, axis=0).astype(np.float32)
         norms = np.linalg.norm(feats_arr, axis=1, keepdims=True)
         return feats_arr / np.clip(norms, 1e-12, None)
