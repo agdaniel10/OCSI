@@ -67,6 +67,8 @@ class Detection:
     #     over a track window; None until a window is long enough for HAR ---
     behaviour_embedding: Optional[np.ndarray] = None  # (d_b,) activity-window embedding b'
     activity_probs: Optional[np.ndarray] = None       # (num_classes,) activity class probs
+    # --- context cue (paper §3.3 Q_c), attached by the perception layer ---
+    context: Optional[np.ndarray] = None              # (d_c,) interaction/context embedding
 
     def __post_init__(self) -> None:
         self.tlwh = np.asarray(self.tlwh, dtype=float)

@@ -9,6 +9,7 @@ from .recognizer import (
     BehaviourRecognizer,
     PrototypeBehaviourRecognizer,
 )
+from .temporal_har import TemporalHARRecognizer
 
 __all__ = [
     "behaviour_gate",
@@ -17,4 +18,5 @@ __all__ = [
     "ActivityObservation",
     "BehaviourRecognizer",
     "PrototypeBehaviourRecognizer",
+    "TemporalHARRecognizer",
 ]

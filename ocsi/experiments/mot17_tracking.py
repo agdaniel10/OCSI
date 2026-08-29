@@ -114,6 +114,7 @@ def _clone_detection(det: Detection) -> Detection:
         keypoints=None if det.keypoints is None else np.asarray(det.keypoints, dtype=float).copy(),
         behaviour_embedding=None,
         activity_probs=None,
+        context=None if det.context is None else np.asarray(det.context, dtype=float).copy(),
     )
 
 
@@ -413,19 +414,40 @@ def track_cached_sequence(
     output_path: str,
     behaviour_seed: Optional[int] = None,
 ) -> List:
-    """Replay cached detections through the tracker and write MOT results."""
+    """Replay cached detections through the tracker and write MOT results.
+
+    Also records per-frame timing and memory-bank statistics on the tracker
+    instance for efficiency reporting.
+    """
+    import time
+
     tracker = OCSITracker(cfg)
     recognizer = _placeholder_behaviour_recognizer(detections_per_frame, cfg, behaviour_seed)
     behaviour_windows: Dict[int, Deque[np.ndarray]] = {}
     max_window = int(cfg.behaviour.min_window)
     rows = []
+    frame_times: List[float] = []
     for frame_idx, detections in enumerate(detections_per_frame):
         frame_detections = _clone_frame_detections(detections)
         _attach_behaviour_observations(tracker, frame_detections, behaviour_windows, recognizer)
+        t0 = time.perf_counter()
         updated_tracks = tracker.update(frame_detections)
+        frame_times.append(time.perf_counter() - t0)
         _update_behaviour_windows(updated_tracks, frame_detections, behaviour_windows, max_window)
         rows.extend(tracker_rows(frame_idx, updated_tracks))
     write_results(output_path, rows)
+
+    # Attach efficiency statistics to the tracker for the caller to read
+    tracker.efficiency = {
+        "frames": len(detections_per_frame),
+        "total_seconds": float(sum(frame_times)),
+        "mean_fps": float(len(frame_times) / sum(frame_times)) if frame_times and sum(frame_times) > 0 else 0.0,
+        "mean_latency_ms": float(1000.0 * sum(frame_times) / len(frame_times)) if frame_times else 0.0,
+        "max_records": len(tracker.bank.records),
+        "total_created": tracker.bank._next_id - 1,
+        "contamination_flags": tracker.contamination_flags,
+        "rollbacks_applied": tracker.rollbacks_applied,
+    }
     return rows
 
 
@@ -664,13 +686,87 @@ def run_mot17_dataset(
     detection_source: str = "public",
     seeds: Sequence[Optional[int]] = (None,),
     reactivation_app_gate: Optional[float] = None,
+    calibration_sequences: Optional[Sequence[str]] = None,
+    evaluation_sequences: Optional[Sequence[str]] = None,
 ) -> Dict:
-    """Run a MOT17 ablation grid across sequences and seeds."""
+    """Run a MOT17 ablation grid across sequences and seeds.
+
+    Leakage-aware threshold calibration:
+    --------------------------------
+    When ``calibration_sequences`` and ``evaluation_sequences`` are both provided,
+    the reactivation gate is calibrated on the calibration sequences only (using
+    their embedding diagnostics), then applied to the evaluation sequences. This
+    prevents the threshold from being informed by the evaluation distribution.
+
+    If only ``evaluation_sequences`` is given, the fixed ``reactivation_app_gate``
+    (or the config default) is used for evaluation — no calibration is performed.
+    """
+    seq_names = [_seq_name(s) for s in seq_dirs]
+    calib_set = set(calibration_sequences or [])
+    eval_set = set(evaluation_sequences or [])
+
+    # Validate that calibration/evaluation sequences exist in seq_dirs
+    if calib_set and not calib_set.issubset(seq_names):
+        raise ValueError(
+            f"calibration_sequences {calib_set - set(seq_names)} not found in seq_dirs"
+        )
+    if eval_set and not eval_set.issubset(seq_names):
+        raise ValueError(
+            f"evaluation_sequences {eval_set - set(seq_names)} not found in seq_dirs"
+        )
+
+    # Determine which sequences are calibration vs evaluation
+    is_calibration = lambda name: name in calib_set
+    is_evaluation = lambda name: name in eval_set
+
+    # If both sets are provided, calibrate the gate on calibration sequences only
+    calibrated_gate: Optional[float] = None
+    if calib_set and eval_set:
+        # Run calibration sequences first to compute the recommended gate
+        calib_gates = []
+        for seq_dir in seq_dirs:
+            name = _seq_name(seq_dir)
+            if not is_calibration(name):
+                continue
+            seq_cache = os.path.join(cache_root, name)
+            # Load or build detections for calibration
+            if rebuild_cache or not os.path.exists(seq_cache):
+                if detection_source == "public":
+                    detections = build_public_detection_cache(
+                        seq_dir, seq_cache, cfg or OCSIConfig(), limit,
+                        (cfg or OCSIConfig()).perception.det_conf_threshold,
+                    )
+                else:
+                    detections = build_perception_cache(seq_dir, seq_cache, cfg or OCSIConfig(), limit)
+            else:
+                detections = load_cached_detections(seq_dir, seq_cache, limit, detection_source)
+            gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
+            diag = embedding_diagnostics(detections, gt)
+            gate = recommended_reactivation_gate(
+                diag,
+                (cfg or OCSIConfig()).association.reactivation_app_gate,
+                diff_margin=(cfg or OCSIConfig()).association.adaptive_diff_margin,
+                same_margin=(cfg or OCSIConfig()).association.adaptive_same_margin,
+            )
+            calib_gates.append(gate)
+        if calib_gates:
+            calibrated_gate = float(np.mean(calib_gates))
+
     runs = []
     for seed in seeds:
         for seq_dir in seq_dirs:
             seq_name = _seq_name(seq_dir)
             cache_dir = os.path.join(cache_root, seq_name)
+
+            # Determine the gate to use for this sequence
+            gate_for_seq = reactivation_app_gate
+            if calibrated_gate is not None and is_evaluation(seq_name):
+                # Use the calibrated gate for evaluation sequences
+                gate_for_seq = calibrated_gate
+            elif is_calibration(seq_name):
+                # Calibration sequences use the fixed gate (or config default)
+                gate_for_seq = reactivation_app_gate
+
             runs.append(
                 run_mot17_sequence(
                     seq_dir=seq_dir,
@@ -682,13 +778,16 @@ def run_mot17_dataset(
                     rebuild_cache=rebuild_cache,
                     detection_source=detection_source,
                     seed=seed,
-                    reactivation_app_gate=reactivation_app_gate,
+                    reactivation_app_gate=gate_for_seq,
                 )
             )
     payload = {
         "detection_source": detection_source,
-        "sequences": [_seq_name(s) for s in seq_dirs],
+        "sequences": seq_names,
         "seeds": list(seeds),
+        "calibration_sequences": sorted(calib_set) if calib_set else None,
+        "evaluation_sequences": sorted(eval_set) if eval_set else None,
+        "calibrated_reactivation_app_gate": calibrated_gate,
         "runs": runs,
     }
     os.makedirs(output_dir, exist_ok=True)

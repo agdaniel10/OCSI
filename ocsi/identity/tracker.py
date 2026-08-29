@@ -18,12 +18,23 @@ assisted reactivation) is layered on in :meth:`OCSITracker.update` /
 :meth:`OCSITracker._reactivate` when ``cfg.behaviour.enabled`` — see
 :mod:`ocsi.behaviour.gate` for the confidence gate that is the actual contribution.
 
+Contamination rollback (paper §3.4 step 14) is integrated in :meth:`OCSITracker.update`:
+when a matched detection's appearance is strongly inconsistent with the track's
+prototype AND the track's memory confidence is high, the match is flagged. After
+``confirm_frames`` consecutive conflicts, the record is rolled back to its last
+clean snapshot.
+
+Adaptive weights (paper §4.3) are applied when ``cfg.association.adaptive_weights``
+is enabled: cue weights are modulated by occlusion ratio, motion uncertainty and
+behaviour confidence.
+
 Consumes ``List[Detection]`` (with embeddings already attached by the perception
 layer), so it is testable with synthetic detections and no models.
 """
 from __future__ import annotations
 
-from typing import List
+from collections import defaultdict
+from typing import Dict, List
 
 import numpy as np
 
@@ -52,6 +63,11 @@ class OCSITracker:
         self.kf = KalmanFilter()
         self.bank = ObjectMemoryBank(cfg.memory)
         self.frame_idx = -1
+        # contamination-rollback bookkeeping: track_id -> consecutive conflict count
+        self._conflict_counts: Dict[int, int] = defaultdict(int)
+        # contamination statistics for diagnostics
+        self.contamination_flags = 0
+        self.rollbacks_applied = 0
 
     # ---------------------------------------------------------------- helpers
     def _ensure_kalman(self, rec: MemoryRecord) -> None:
@@ -62,11 +78,73 @@ class OCSITracker:
         source = xyah_to_tlwh(rec.mean[:4]) if rec.mean is not None else rec.last_box
         return tlwh_to_xyxy(source)
 
-    def _reliability(self, det: Detection, score: float) -> float:
-        """Interim reliability: detection confidence blended with the multi-cue
-        match score (a proxy for cross-cue consistency). The full design formula
-        (adding the assignment margin) is a later refinement."""
-        return float(np.clip(0.5 * det.confidence + 0.5 * score, 0.0, 1.0))
+    def _reliability(
+        self,
+        det: Detection,
+        score: float,
+        assignment_margin: float = 0.0,
+        cue_consistency: float = 0.0,
+    ) -> float:
+        """Reliability of a matched pair (paper §3.4 step 8).
+
+        Combines detection confidence, the multi-cue match score, the assignment
+        margin (best minus second-best score for this detection) and cross-cue
+        consistency (1 - std of the per-cue scores for the matched pair).
+        """
+        return float(
+            np.clip(
+                0.4 * det.confidence
+                + 0.3 * score
+                + 0.2 * assignment_margin
+                + 0.1 * cue_consistency,
+                0.0,
+                1.0,
+            )
+        )
+
+    def _adaptive_weights(
+        self,
+        base_weights: Dict[str, float],
+        tracks,
+        detections,
+        occlusion_ratio: float = 0.0,
+        motion_uncertainty: float = 0.0,
+        behaviour_confidence: float = 0.0,
+    ) -> Dict[str, float]:
+        """Paper §4.3: modulate cue weights by reliability signals.
+
+        - Under high occlusion: boost memory weight.
+        - Under high motion uncertainty: boost appearance/pose weight.
+        - Under low behaviour confidence: suppress behaviour weight.
+        Returns a dict of weights (not yet softmax-normalised; ``weighted_score``
+        renormalises over the active cues).
+        """
+        a = self.cfg.association
+        w = dict(base_weights)
+        if not a.adaptive_weights:
+            return w
+
+        # occlusion ratio: fraction of tracks currently LOST
+        if tracks:
+            lost = sum(1 for t in tracks if t.state == TrackState.LOST)
+            occlusion_ratio = max(occlusion_ratio, lost / len(tracks))
+
+        # motion uncertainty: mean trace of Kalman covariance (normalised)
+        if tracks:
+            traces = []
+            for t in tracks:
+                if t.covariance is not None:
+                    traces.append(float(np.trace(t.covariance)))
+            if traces:
+                motion_uncertainty = max(motion_uncertainty, float(np.mean(traces)) / 1e4)
+
+        # modulate
+        w["memory"] = w.get("memory", 0.0) * (1.0 + occlusion_ratio)
+        w["app"] = w.get("app", 0.0) * (1.0 + motion_uncertainty)
+        w["motion"] = w.get("motion", 0.0) * (1.0 - 0.5 * motion_uncertainty)
+        if "behaviour" in w:
+            w["behaviour"] = w["behaviour"] * behaviour_confidence
+        return w
 
     def _behaviour_terms(self, tracks, dets):
         """Behaviour cue matrices for ``tracks x dets`` (paper §3.5), or ``None``.
@@ -111,6 +189,34 @@ class OCSITracker:
         if float(det.activity_probs.max()) < b.theta_b:
             return
         self.bank.update_behaviour(track_id, det.activity_probs, det.behaviour_embedding, reliability)
+
+    def _check_contamination(self, rec: MemoryRecord, det: Detection) -> bool:
+        """Detect a likely incorrect match (paper §3.4 step 14).
+
+        Returns True when the detection's appearance is strongly inconsistent with
+        the track's prototype AND the track's memory confidence is high enough that
+        the mismatch is suspicious (rather than a low-confidence track that simply
+        has poor evidence).
+        """
+        c = self.cfg.contamination
+        if not c.enabled:
+            return False
+        if rec.a_bar is None or det.embedding is None:
+            return False
+        if rec.q < c.confidence_min:
+            return False
+        cos = float(cosine_matrix(np.asarray([rec.a_bar]), np.asarray([det.embedding]))[0, 0])
+        return cos < c.appearance_conflict_threshold
+
+    def _maybe_rollback(self, rec: MemoryRecord) -> None:
+        """Increment the conflict counter and roll back after ``confirm_frames``
+        consecutive conflicts."""
+        c = self.cfg.contamination
+        self._conflict_counts[rec.track_id] += 1
+        if self._conflict_counts[rec.track_id] >= c.confirm_frames:
+            if rec.rollback():
+                self.rollbacks_applied += 1
+            self._conflict_counts[rec.track_id] = 0
 
     def _reactivate(self, tracks, detections, um_tracks, um_dets):
         """Appearance-only re-association of LOST tracks to leftover detections
@@ -210,6 +316,45 @@ class OCSITracker:
                     terms["mem"] = np.where(has_proto[:, None], mem, 0.0)
                     weights["mem"] = a.w_memory
 
+            # Pose cue (Phase 4): when detections carry keypoints and tracks have
+            # pose queues, add a pose-similarity term.
+            if all(d.keypoints is not None for d in detections) and any(
+                len(r.Q_p) > 0 for r in tracks
+            ):
+                pose_terms = []
+                for r in tracks:
+                    if len(r.Q_p) == 0:
+                        pose_terms.append(np.zeros(D, dtype=float))
+                        continue
+                    # mean keypoint distance (after simple alignment) -> similarity
+                    track_kp = np.mean(np.stack(list(r.Q_p)), axis=0)  # (K, 3)
+                    sims = []
+                    for d in detections:
+                        det_kp = np.asarray(d.keypoints, dtype=float)
+                        if det_kp.shape != track_kp.shape:
+                            sims.append(0.0)
+                            continue
+                        dist = float(np.mean(np.linalg.norm(det_kp[:, :2] - track_kp[:, :2], axis=1)))
+                        sims.append(float(np.exp(-dist / 50.0)))
+                    pose_terms.append(np.asarray(sims, dtype=float))
+                terms["pose"] = np.stack(pose_terms)
+                weights["pose"] = a.w_pose
+
+            # Context cue (Phase 4): relative-position context between tracks and dets.
+            if T > 0 and D > 0:
+                track_centers = np.stack([r.predicted_center() for r in tracks])  # (T, 2)
+                det_centers = np.stack([d.center for d in detections])            # (D, 2)
+                # context similarity: 1 - normalised pairwise center distance
+                dist = np.linalg.norm(
+                    track_centers[:, None, :] - det_centers[None, :, :], axis=2
+                )
+                scale = max(float(np.max(dist)), 1e-9)
+                terms["context"] = 1.0 - dist / scale
+                weights["context"] = a.w_context
+
+            # Adaptive weights (paper §4.3)
+            weights = self._adaptive_weights(weights, tracks, detections)
+
             score = weighted_score(terms, weights)
             valid = gate_mask(
                 iou_mat, d2_mat, a.iou_gate, a.mahalanobis_gate, track_cls, det_cls
@@ -245,7 +390,22 @@ class OCSITracker:
         for ti, di in matches:
             rec, det = tracks[ti], detections[di]
             rec.mean, rec.covariance = self.kf.update(rec.mean, rec.covariance, det.xyah)
-            rel = self._reliability(det, score[ti, di])
+            # assignment margin: best minus second-best score for this detection
+            margin = 0.0
+            if D > 1:
+                col = score[:, di]
+                sorted_col = np.sort(col)[::-1]
+                margin = float(sorted_col[0] - sorted_col[1]) if len(sorted_col) > 1 else 0.0
+            # cue consistency: 1 - std of the per-cue scores for this pair
+            cue_vals = [float(terms[k][ti, di]) for k in terms if k in weights and weights[k] > 0]
+            cue_consistency = 1.0 - float(np.std(cue_vals)) if cue_vals else 0.0
+            rel = self._reliability(det, score[ti, di], margin, cue_consistency)
+            # contamination detection + rollback
+            if self._check_contamination(rec, det):
+                self.contamination_flags += 1
+                self._maybe_rollback(rec)
+            else:
+                self._conflict_counts[rec.track_id] = 0
             self.bank.update(rec.track_id, det, rel, f)
             self._maybe_update_behaviour(rec.track_id, det, rel)
         for ti, di, appsc in reactivations:
@@ -274,3 +434,6 @@ class OCSITracker:
     def reset(self) -> None:
         self.bank = ObjectMemoryBank(self.cfg.memory)
         self.frame_idx = -1
+        self._conflict_counts.clear()
+        self.contamination_flags = 0
+        self.rollbacks_applied = 0

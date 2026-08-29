@@ -9,6 +9,7 @@ from .mot_io import (
     write_results,
 )
 from .statistics import bootstrap_mean_ci, choose_threshold_from_similarity, paired_stats
+from .trackeval import parse_trackeval_results, run_trackeval
 
 __all__ = [
     "format_row",
@@ -25,4 +26,6 @@ __all__ = [
     "bootstrap_mean_ci",
     "choose_threshold_from_similarity",
     "paired_stats",
+    "run_trackeval",
+    "parse_trackeval_results",
 ]

@@ -35,6 +35,23 @@ class MemoryConfig:
 
 
 @dataclass
+class ContaminationConfig:
+    """Contamination-rollback control (paper §3.4 step 14).
+
+    The tracker detects a likely incorrect match by comparing the detection
+    embedding against the track's appearance prototype. When the cosine is below
+    ``appearance_conflict_threshold`` AND the track's memory confidence is at or
+    above ``confidence_min``, the match is flagged. After ``confirm_frames``
+    consecutive conflicts, the record is rolled back to its last clean snapshot.
+    """
+
+    enabled: bool = True                # master switch for contamination detection
+    appearance_conflict_threshold: float = 0.30  # raw cosine below this = likely wrong identity
+    confidence_min: float = 0.70        # only flag conflicts on high-confidence tracks
+    confirm_frames: int = 2             # consecutive conflicts before rollback is applied
+
+
+@dataclass
 class AssociationConfig:
     """Unified association score, gating and assignment (paper §4.2–4.3)."""
 
@@ -44,6 +61,8 @@ class AssociationConfig:
     w_iou: float = 0.20
     w_memory: float = 0.20
     w_behaviour: float = 0.10           # only contributes when behaviour feedback is enabled
+    w_pose: float = 0.05                # pose-similarity weight (used when pose features exist)
+    w_context: float = 0.05             # context-similarity weight (used when context features exist)
     use_memory: bool = True             # ablation: False -> baseline (short-term appearance only)
     s_min: float = 0.30                 # reject assignments scoring below this
     iou_gate: float = 0.10              # minimum geometric plausibility
@@ -64,6 +83,8 @@ class AssociationConfig:
     adaptive_diff_margin: float = 0.03    # keep the gate above observed different-ID similarity
     adaptive_same_margin: float = 0.02    # keep the gate below observed same-ID similarity when
     #                                      the embedding separation allows it
+    adaptive_weights: bool = False        # paper §4.3: modulate cue weights by reliability
+    #                                      (occlusion ratio, motion uncertainty, behaviour conf)
 
 
 @dataclass
@@ -89,7 +110,8 @@ class PerceptionConfig:
     detector_weights: str = "yolov8s.pt"
     person_class_id: int = 0
     det_conf_threshold: float = 0.15
-    reid_backend: str = "torchvision"   # "torchvision" control or "torchreid" person-ReID
+    reid_backend: str = "auto"          # "auto" (torchreid/OSNet -> resnet50 -> resnet18),
+    #                                     "torchvision" control, or "torchreid" person-ReID
     reid_backbone: str = "resnet18"     # torchvision backbone; OSNet is an optional upgrade
     reid_input_hw: Tuple[int, int] = (256, 128)  # (height, width) standard Re-ID crop
     reid_pretrained: bool = True        # load ImageNet weights (needs a one-off download);
@@ -103,6 +125,7 @@ class PerceptionConfig:
 @dataclass
 class OCSIConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    contamination: ContaminationConfig = field(default_factory=ContaminationConfig)
     association: AssociationConfig = field(default_factory=AssociationConfig)
     behaviour: BehaviourConfig = field(default_factory=BehaviourConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
@@ -197,20 +220,28 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
         cfg.association.use_memory = False
         cfg.association.reactivation = False   # no appearance rescue: motion/IoU association only
         cfg.association.adaptive_reactivation = False
+        cfg.association.adaptive_weights = False
         cfg.behaviour.enabled = False
+        cfg.contamination.enabled = False
     elif stage == "memory":
         cfg.association.use_memory = True
         cfg.association.reactivation = True    # memory bank persists identity across occlusion
         cfg.association.adaptive_reactivation = False
+        cfg.association.adaptive_weights = False
         cfg.behaviour.enabled = False
+        cfg.contamination.enabled = True
     elif stage == "adaptive_memory":
         cfg.association.use_memory = True
         cfg.association.reactivation = True
         cfg.association.adaptive_reactivation = True
+        cfg.association.adaptive_weights = False
         cfg.behaviour.enabled = False
+        cfg.contamination.enabled = True
     elif stage == "feedback":
         cfg.association.use_memory = True
         cfg.association.reactivation = True
         cfg.association.adaptive_reactivation = False
+        cfg.association.adaptive_weights = True
         cfg.behaviour.enabled = True
+        cfg.contamination.enabled = True
     return cfg

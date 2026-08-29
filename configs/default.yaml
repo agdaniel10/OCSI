@@ -18,12 +18,20 @@ memory:
   rollback_history: 3            # snapshots kept for contamination rollback
   archive_on_expire: false       # archive (vs delete) expired records
 
+contamination:
+  enabled: true                  # master switch for contamination detection
+  appearance_conflict_threshold: 0.30  # raw cosine below this = likely wrong identity
+  confidence_min: 0.70           # only flag conflicts on high-confidence tracks
+  confirm_frames: 2              # consecutive conflicts before rollback is applied
+
 association:
   w_app: 0.30                    # appearance similarity weight
   w_motion: 0.20                 # motion (Mahalanobis) weight
   w_iou: 0.20                    # IoU weight
   w_memory: 0.20                 # memory-similarity weight
   w_behaviour: 0.10              # behaviour weight (only when gated on)
+  w_pose: 0.05                   # pose-similarity weight (used when pose features exist)
+  w_context: 0.05                # context-similarity weight (used when context features exist)
   use_memory: true               # ablation: false -> baseline (short-term appearance)
   s_min: 0.30                    # reject assignments scoring below this
   iou_gate: 0.10                 # minimum geometric plausibility
@@ -32,6 +40,10 @@ association:
   high_conf_threshold: 0.50
   reactivation: true             # allow LOST tracks to re-associate by appearance after occlusion
   reactivation_app_gate: 0.84     # min raw cosine; should sit above observed diff-ID range
+  adaptive_reactivation: false   # estimate a sequence-specific reactivation gate
+  adaptive_diff_margin: 0.03     # keep the gate above observed different-ID similarity
+  adaptive_same_margin: 0.02     # keep the gate below observed same-ID similarity
+  adaptive_weights: false        # paper §4.3: modulate cue weights by reliability
 
 behaviour:
   enabled: false                 # ablation flag: closed-loop feedback on/off
@@ -48,7 +60,12 @@ perception:
   detector_weights: "yolov8s.pt"
   person_class_id: 0
   det_conf_threshold: 0.15
-  reid_backbone: "resnet18"
+  reid_backend: "auto"           # "auto" (torchreid/OSNet -> resnet50 -> resnet18),
+                                 # "torchvision" control, or "torchreid" person-ReID
+  reid_backbone: "resnet18"      # torchvision backbone; OSNet is an optional upgrade
   reid_input_hw: [256, 128]      # (height, width) standard Re-ID crop
-  use_pose: false
+  reid_pretrained: true          # load ImageNet weights (needs a one-off download)
+  reid_batch_size: 64            # crops per forward pass
+  device: "auto"                 # "auto" -> cuda when available, else cpu
+  use_pose: false                # off by default on CPU
   pose_weights: "yolov8n-pose.pt"

@@ -139,11 +139,63 @@ tests/
   Aggregate: baseline MOTA 0.837 / IDF1 0.348 / IDsw 30 → +memory MOTA 0.964 / IDF1 0.789 /
   IDsw 5. (*L=40 > `max_age`=30: the bounded-memory retention cliff.) Run:
   `python -m ocsi.experiments.occlusion_recovery`.
-- **106 tests pass** (`python -m pytest -q` from the repository root).
-- Next: the **behaviour** module (Phases 4-5). NOTE: real AVA HAR needs the annotation CSV +
-  videos (the `ava_train_excluded_timestamps` file is only AVA's exclusion blacklist); the
-  recommended real path is a pretrained action model feeding the confidence-gated feedback
-  loop. Then optional Phase 6 (TrackEval/HOTA + CLI).
+- **124 tests pass** (`python -m pytest -q` from the repository root).
+
+## Loophole Fixes (v1.1)
+
+The following improvements address the weaknesses identified in the reproduction report
+and the AI review:
+
+1. **Contamination rollback integrated into the tracker** (`ocsi/identity/tracker.py`):
+   The tracker now detects likely incorrect matches (appearance cosine below a threshold
+   on a high-confidence track) and rolls back the memory record after consecutive conflicts.
+   Config: `ocsi/config.py` → `ContaminationConfig`.
+
+2. **Leakage-aware threshold calibration** (`ocsi/experiments/mot17_tracking.py`):
+   `run_mot17_dataset` now supports `calibration_sequences` and `evaluation_sequences`
+   parameters. The reactivation gate is calibrated on the calibration sequences only,
+   then applied to the evaluation sequences — preventing threshold-selection leakage.
+
+3. **Person-ReID backbone with auto fallback** (`ocsi/perception/embedder.py`):
+   The default `reid_backend` is now `"auto"`, which tries `torchreid/OSNet` first,
+   then `torchvision/resnet50`, then `torchvision/resnet18`. This ensures the strongest
+   available appearance model is used.
+
+4. **Pose and context cues** (`ocsi/identity/tracker.py`):
+   The tracker now computes pose-similarity and context-similarity terms when pose
+   keypoints and context features are available. The `Detection` type now carries a
+   `context` field, and `MemoryRecord` populates the `Q_c` context queue.
+
+5. **Adaptive weights** (`ocsi/identity/tracker.py`):
+   When `cfg.association.adaptive_weights` is enabled, cue weights are modulated by
+   occlusion ratio, motion uncertainty, and behaviour confidence (paper §4.3).
+
+6. **Temporal HAR model** (`ocsi/behaviour/temporal_har.py`):
+   A genuine temporal HAR recognizer with temporal attention pooling and trainable
+   class prototypes. This replaces the placeholder recognizer for real behaviour
+   feedback experiments.
+
+7. **Official TrackEval integration** (`ocsi/eval/trackeval.py`):
+   A wrapper around the official TrackEval toolkit for HOTA/DetA/AssA/MOTA/IDF1.
+
+8. **Controlled baselines** (`ocsi/experiments/baselines/`):
+   DeepSORT, ByteTrack, and OC-SORT baseline trackers that use the same Kalman filter
+   and detection inputs as OCSI, enabling fair comparison.
+
+9. **MOT20 support** (`ocsi/experiments/mot20.py`):
+   An adapter for the MOT20 benchmark (denser crowds, more occlusion).
+
+10. **Effect sizes in statistics** (`ocsi/eval/statistics.py`):
+    `paired_stats` now reports Cohen's d and rank-biserial correlation alongside
+    p-values.
+
+11. **Efficiency reporting** (`ocsi/experiments/mot17_tracking.py`):
+    `track_cached_sequence` now records per-frame timing, FPS, latency, and
+    memory-bank statistics on the tracker instance.
+
+12. **Improved reliability proxy** (`ocsi/identity/tracker.py`):
+    `_reliability` now combines detection confidence, match score, assignment margin,
+    and cross-cue consistency (paper §3.4 step 8).
 
 ## Ethics
 

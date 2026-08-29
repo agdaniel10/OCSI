@@ -114,6 +114,10 @@ def _add_mot17_q1_parser(subparsers) -> None:
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("ocsi_q1_results"))
     parser.add_argument("--sequences", nargs="*", default=None)
+    parser.add_argument("--calibration-sequences", nargs="*", default=None,
+                        help="Reserved sequences for threshold calibration; never use evaluation outcomes to tune.")
+    parser.add_argument("--evaluation-sequences", nargs="*", default=None,
+                        help="Sequences evaluated with the calibrated threshold.")
     parser.add_argument("--stages", nargs="*", default=list(DEFAULT_Q1_STAGES), choices=ABLATION_STAGES)
     parser.add_argument("--detection-source", choices=("public", "yolo"), default="public")
     parser.add_argument("--det-conf", type=float, default=None)
@@ -140,6 +144,8 @@ def _run_mot17_q1(args) -> int:
         detection_source=args.detection_source,
         seeds=tuple(args.seeds),
         reactivation_app_gate=args.reactivation_app_gate,
+        calibration_sequences=args.calibration_sequences,
+        evaluation_sequences=args.evaluation_sequences,
     )
     args.out.mkdir(parents=True, exist_ok=True)
     rows = _flatten_results(payload)

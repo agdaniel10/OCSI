@@ -50,11 +50,42 @@ class ReIDEmbedder:
             self.model = self._build_torchvision_model()
         elif self.backend == "torchreid":
             self.model = self._build_torchreid_model()
+        elif self.backend == "auto":
+            # Fallback chain: torchreid/OSNet -> torchvision/resnet50 -> torchvision/resnet18
+            self.model, self.backend_name = self._build_auto_model()
         else:
-            raise ValueError("reid_backend must be 'torchvision' or 'torchreid'")
+            raise ValueError("reid_backend must be 'torchvision', 'torchreid', or 'auto'")
 
         self.model.to(self.device).eval()
         self.dim = self._infer_dim()
+
+    def _build_auto_model(self):
+        """Try person-ReID (torchreid/OSNet) first, then torchvision backbones."""
+        # Try torchreid/OSNet first
+        try:
+            import torchreid
+            model = torchreid.models.build_model(
+                name="osnet_x1_0",
+                num_classes=1000,
+                loss="softmax",
+                pretrained=bool(self.cfg.reid_pretrained),
+            )
+            return model, "torchreid:osnet_x1_0"
+        except Exception:
+            pass
+
+        # Fall back to torchvision/resnet50
+        try:
+            from torchvision import models
+            backbone = models.resnet50(weights="DEFAULT" if self.cfg.reid_pretrained else None)
+            return self._torch.nn.Sequential(*list(backbone.children())[:-1]), "torchvision:resnet50"
+        except Exception:
+            pass
+
+        # Final fallback: torchvision/resnet18
+        from torchvision import models
+        backbone = models.resnet18(weights="DEFAULT" if self.cfg.reid_pretrained else None)
+        return self._torch.nn.Sequential(*list(backbone.children())[:-1]), "torchvision:resnet18"
 
     def _build_torchvision_model(self):
         from torchvision import models

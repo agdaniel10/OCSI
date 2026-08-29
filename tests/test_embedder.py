@@ -17,7 +17,11 @@ from ocsi.perception import ReIDEmbedder  # noqa: E402
 
 
 def _cfg():
-    return PerceptionConfig(reid_pretrained=False, reid_backbone="resnet18")
+    return PerceptionConfig(
+        reid_pretrained=False,
+        reid_backend="torchvision",
+        reid_backbone="resnet18",
+    )
 
 
 def _frame(h=200, w=320, seed=0):

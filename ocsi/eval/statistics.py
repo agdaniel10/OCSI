@@ -25,7 +25,13 @@ def bootstrap_mean_ci(
 
 
 def paired_stats(base: Sequence[float], treatment: Sequence[float]) -> Dict[str, float]:
-    """Paired delta, Wilcoxon, and paired t-test after dropping non-finite pairs."""
+    """Paired delta, Wilcoxon, paired t-test, and effect sizes after dropping
+    non-finite pairs.
+
+    Effect sizes:
+      * ``cohens_d`` — mean difference / std of differences (paired Cohen's d).
+      * ``rank_biserial`` — rank-biserial correlation from the Wilcoxon statistic.
+    """
     a = np.asarray(base, dtype=float)
     b = np.asarray(treatment, dtype=float)
     mask = np.isfinite(a) & np.isfinite(b)
@@ -37,6 +43,8 @@ def paired_stats(base: Sequence[float], treatment: Sequence[float]) -> Dict[str,
             "median_delta": np.nan,
             "wilcoxon_p": np.nan,
             "paired_t_p": np.nan,
+            "cohens_d": np.nan,
+            "rank_biserial": np.nan,
         }
 
     d = b - a
@@ -49,12 +57,33 @@ def paired_stats(base: Sequence[float], treatment: Sequence[float]) -> Dict[str,
     except Exception:
         paired_t_p = np.nan
 
+    # Cohen's d (paired): mean difference / std of differences
+    std_d = float(np.std(d, ddof=1)) if len(d) > 1 else 0.0
+    cohens_d = float(np.mean(d) / std_d) if std_d > 0 else np.nan
+
+    # Rank-biserial correlation from Wilcoxon
+    rank_biserial = np.nan
+    try:
+        from scipy.stats import rankdata
+        # r = 1 - (2 * W) / (n * (n + 1)) for the signed-rank sum
+        n = len(d)
+        if n > 0:
+            ranks = rankdata(np.abs(d))
+            w_plus = float(np.sum(ranks[d > 0]))
+            w_minus = float(np.sum(ranks[d < 0]))
+            total = n * (n + 1) / 2.0
+            rank_biserial = float((w_plus - w_minus) / total) if total > 0 else np.nan
+    except Exception:
+        rank_biserial = np.nan
+
     return {
         "n": int(len(a)),
         "mean_delta": float(np.mean(d)),
         "median_delta": float(np.median(d)),
         "wilcoxon_p": float(wilcoxon_p) if np.isfinite(wilcoxon_p) else np.nan,
         "paired_t_p": float(paired_t_p) if np.isfinite(paired_t_p) else np.nan,
+        "cohens_d": float(cohens_d) if np.isfinite(cohens_d) else np.nan,
+        "rank_biserial": float(rank_biserial) if np.isfinite(rank_biserial) else np.nan,
     }
 
 

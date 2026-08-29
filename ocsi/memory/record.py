@@ -144,6 +144,8 @@ class MemoryRecord:
             self.update_appearance(det.embedding, reliability)
         if det.keypoints is not None:
             self.Q_p.append(np.asarray(det.keypoints, dtype=float))
+        if det.context is not None:
+            self.Q_c.append(np.asarray(det.context, dtype=float))
         self.update_confidence(reliability)
 
         self.last_box = box

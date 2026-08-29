@@ -27,7 +27,13 @@ def _render(ax, bx, y=60, w=44, h=84, W=320, H=200):
 
 
 def test_embedder_feeds_pipeline_end_to_end():
-    emb = ReIDEmbedder(OCSIConfig().perception.__class__(reid_pretrained=False))
+    emb = ReIDEmbedder(
+        OCSIConfig().perception.__class__(
+            reid_pretrained=False,
+            reid_backend="torchvision",
+            reid_backbone="resnet18",
+        )
+    )
     dets_per_frame, gt = [], {}
     for k in range(8):
         ax, bx = 20 + 8 * k, 220 + 8 * k                 # two well-separated objects
