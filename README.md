@@ -194,7 +194,7 @@ tests/
   the live tracker. Producers are real: per-detection head Grad-CAM (`E_det`) and
   perturbation-based HAR saliency (`s_t`), cached per frame. A trained HAR model
   and label-dependent CECS validation remain TODO (MOT17 has no activity labels).
-- **177 tests pass** (`python -m pytest -q` from the repository root).
+- **179 tests pass** (`python -m pytest -q` from the repository root).
 
 ## Loophole Fixes (v1.1)
 

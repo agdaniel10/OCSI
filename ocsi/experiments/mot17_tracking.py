@@ -166,6 +166,13 @@ def write_explanation_cache(path: str, detections: Sequence[Detection]) -> bool:
     if not indices:
         return False
     payload["indices"] = np.asarray(indices, dtype=np.int32)
+    # The sidecar is written from inside ``FeatureCache.get_or_compute``'s
+    # ``compute`` callback, i.e. *before* ``FeatureCache.put`` creates the cache
+    # directory. On a fresh cache the parent directory therefore does not exist
+    # yet, so create it here.
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     np.savez_compressed(path, **payload)
     return True
 
@@ -343,7 +350,18 @@ def build_perception_cache(
             dets = detector.explain(frame_bgr, dets, heatmap_size=cfg.xai.heatmap_size)
         return dets
 
-    return _attach_embeddings_to_frames(seq_dir, cache_dir, detections_for_frame, cfg, "yolo", limit)
+    # The confidence threshold is part of the cache key; ``run_mot17_sequence``
+    # loads with ``cfg.perception.det_conf_threshold``, so the build must use the
+    # same value or every run sees a missing/partial cache.
+    return _attach_embeddings_to_frames(
+        seq_dir,
+        cache_dir,
+        detections_for_frame,
+        cfg,
+        "yolo",
+        limit,
+        cfg.perception.det_conf_threshold,
+    )
 
 
 def build_public_detection_cache(

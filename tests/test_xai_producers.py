@@ -315,6 +315,16 @@ def test_explanation_cache_skips_frames_without_evidence(tmp_path):
     assert read_explanation_cache(path, 3) == [None, None, None]
 
 
+def test_explanation_cache_creates_missing_parent_directory(tmp_path):
+    """The sidecar is written before ``FeatureCache.put`` creates the dir."""
+    path = str(tmp_path / "fresh" / "nested" / "000001.xai.npz")
+    det = Detection(
+        [0, 0, 4, 4], 0.9, explanation=ExplanationInput(det_heatmap=np.ones((4, 4)))
+    )
+    assert write_explanation_cache(path, [det]) is True
+    assert os.path.exists(path)
+
+
 def test_attach_explanation_cache_keeps_existing_evidence(tmp_path):
     heatmap = np.ones((4, 4))
     path = explanation_cache_path(str(tmp_path / "frame.npy"))
@@ -486,7 +496,8 @@ def test_build_perception_cache_passes_heatmap_size(monkeypatch):
             captured.append(heatmap_size)
             return dets
 
-    def fake_attach(seq_dir, cache_dir, fn, cfg, source, limit):
+    def fake_attach(seq_dir, cache_dir, fn, cfg, source, limit, det_conf_threshold=0.0):
+        captured.append(("threshold", det_conf_threshold))
         fn(0, np.zeros((4, 4, 3), dtype=np.uint8))
         return []
 
@@ -497,4 +508,83 @@ def test_build_perception_cache_passes_heatmap_size(monkeypatch):
 
     mot17_tracking.build_perception_cache("seq", "cache", cfg)
 
-    assert captured == [tuple(cfg.xai.heatmap_size)]
+    assert captured[0] == ("threshold", cfg.perception.det_conf_threshold)
+    assert captured[1] == tuple(cfg.xai.heatmap_size)
+
+
+def test_fresh_perception_cache_build_is_loadable_by_the_runner(monkeypatch, tmp_path):
+    """A fresh build must be readable by the loader (key + sidecar contract).
+
+    Regression: the sidecar was written before ``FeatureCache.put`` created the
+    cache directory, and the build hashed ``conf0`` while the loader used the
+    configured ``conf0.15``. On a real fresh cache that crashed the first run and
+    then made every later run look like a partial cache.
+    """
+    import cv2
+
+    import ocsi.perception as perception
+
+    n_frames = 2
+    seq = _make_sequence(tmp_path, n_frames=n_frames)
+    for i in range(1, n_frames + 1):
+        img = np.full((24, 32, 3), i * 10, dtype=np.uint8)
+        assert cv2.imwrite(str(seq / "img1" / f"{i:06d}.jpg"), img)
+
+    class _Detector:
+        def __init__(self, cfg):
+            pass
+
+        def __call__(self, frame, frame_idx=-1):
+            return [Detection([4, 6, 8, 10], 0.9)]
+
+        def explain(self, frame, dets, heatmap_size=None):
+            del heatmap_size
+            h, w = frame.shape[:2]
+            for det in dets:
+                det.explanation = ExplanationInput(
+                    det_heatmap=np.ones((8, 8)), img_shape=(h, w)
+                )
+            return dets
+
+    class _Embedder:
+        def __init__(self, cfg):
+            pass
+
+        def attach_embeddings(self, frame_rgb, dets):
+            del frame_rgb
+            for det in dets:
+                det.embedding = np.array([1.0, 0.0], dtype=np.float32)
+            return dets
+
+    monkeypatch.setattr(perception, "YOLODetector", _Detector)
+    monkeypatch.setattr(perception, "ReIDEmbedder", _Embedder)
+
+    cfg = OCSIConfig()
+    cfg.xai.enabled = True
+    cache_dir = str(tmp_path / "fresh_cache")
+
+    built = mot17_tracking.build_perception_cache(str(seq), cache_dir, cfg)
+    assert len(built) == n_frames
+
+    key = mot17_tracking._cache_key(
+        str(seq), "yolo", 0, cfg.perception.det_conf_threshold
+    )
+    assert os.path.exists(FeatureCache(cache_dir).path(key, ".xai.npz"))
+
+    loaded = mot17_tracking.load_cached_detections(
+        str(seq),
+        cache_dir,
+        detection_source="yolo",
+        det_conf_threshold=cfg.perception.det_conf_threshold,
+    )
+    assert len(loaded) == n_frames
+    assert loaded[0][0].embedding is not None
+    assert loaded[0][0].explanation is not None
+    assert np.allclose(loaded[0][0].explanation.det_heatmap, 1.0)
+    assert tuple(loaded[0][0].explanation.img_shape) == (24, 32)
+
+    # The threshold is part of the key, so the default-conf load must miss.
+    with pytest.raises(FileNotFoundError):
+        mot17_tracking.load_cached_detections(
+            str(seq), cache_dir, detection_source="yolo"
+        )

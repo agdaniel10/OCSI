@@ -339,7 +339,7 @@ class DetectorGradCAM:
             g0 = grad[0] * mask_t
             weights = g0.mean(dim=(1, 2), keepdim=True)
             cam = F.relu((weights * f0).sum(dim=0))
-            if float(cam.max()) <= 0.0:
+            if float(cam.detach().max()) <= 0.0:
                 # Degenerate (all channel-weighted activations negative, common on
                 # near-blank crops): fall back to positive-gradient weighting so the
                 # evidence map still localises.
