@@ -1,0 +1,26 @@
+{
+  "baseline": {
+    "n_total": 7337,
+    "n_correct": 7212,
+    "n_switched": 125,
+    "cecs_correct_mean": 0.9102221155903627,
+    "cecs_switched_mean": 0.8100922550699791,
+    "cecs_all_mean": 0.9085162095572364
+  },
+  "memory": {
+    "n_total": 7369,
+    "n_correct": 7269,
+    "n_switched": 100,
+    "cecs_correct_mean": 0.9092017033826416,
+    "cecs_switched_mean": 0.81211752710123,
+    "cecs_all_mean": 0.9078842359341222
+  },
+  "feedback": {
+    "n_total": 7369,
+    "n_correct": 7269,
+    "n_switched": 100,
+    "cecs_correct_mean": 0.9092017033826416,
+    "cecs_switched_mean": 0.81211752710123,
+    "cecs_all_mean": 0.9078842359341222
+  }
+}

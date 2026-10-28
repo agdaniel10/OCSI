@@ -50,6 +50,23 @@ def test_ablation_does_not_mutate_source():
     assert cfg.behaviour.enabled is False  # original untouched
 
 
+def test_xocsi_ablation_stage_enables_explainability():
+    cfg = apply_ablation(OCSIConfig(), "x-ocsi")
+    assert cfg.xai.enabled is True
+    assert cfg.behaviour.enabled is True
+    assert cfg.association.use_memory is True
+    assert cfg.association.adaptive_weights is True
+    # Aliases resolve to the same canonical stage.
+    for alias in ("xai", "xocs", "x_ocsi"):
+        assert apply_ablation(OCSIConfig(), alias).xai.enabled is True
+
+
+def test_defaults_include_disabled_xai_config():
+    cfg = OCSIConfig()
+    assert cfg.xai.enabled is False
+    assert cfg.xai.w_s + cfg.xai.w_t + cfg.xai.w_i == pytest.approx(1.0)
+
+
 def test_ablation_invalid_stage():
     with pytest.raises(ValueError):
         apply_ablation(OCSIConfig(), "nonsense")

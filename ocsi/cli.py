@@ -81,7 +81,8 @@ def _write_q1_summary(out_dir: Path, rows: Sequence[Dict]) -> None:
         for row in rows
         if row["Stage"] == "baseline"
     }
-    for treatment in ("memory", "adaptive_memory", "feedback"):
+    treatments = sorted({str(row["Stage"]) for row in rows if row["Stage"] != "baseline"})
+    for treatment in treatments:
         treatment_rows = {
             (row["Sequence"], row["Seed"]): row
             for row in rows

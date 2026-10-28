@@ -1,5 +1,6 @@
 """Tests for the cacheable MOT17 experiment runner."""
 import numpy as np
+import pytest
 
 from ocsi.config import OCSIConfig
 from ocsi.experiments.mot17_tracking import (
@@ -167,6 +168,30 @@ def test_run_mot17_sequence_keeps_feedback_behaviour_enabled(tmp_path, monkeypat
     assert seen == [(False, 7), (True, 7)]
 
 
+def test_run_mot17_sequence_xocsi_writes_cecs_sidecar(tmp_path):
+    seq = _make_seq(tmp_path, n_frames=4)
+    cache_dir = str(tmp_path / "cache")
+    cache = FeatureCache(cache_dir)
+    emb = np.array([1.0, 0.0], dtype=np.float32)
+    for i in range(1, 5):
+        det = Detection([10 + i, 20, 30, 40], 0.95, embedding=emb)
+        cache.put(f"MOT17-02-FRCNN/yolo/conf0.15/{i:06d}", detections_to_array([det]))
+
+    payload = run_mot17_sequence(
+        str(seq),
+        cache_dir,
+        str(tmp_path / "out"),
+        stages=("x-ocsi",),
+    )
+
+    metrics = payload["results"][0]["metrics"]
+    assert metrics["cecs"]["enabled"] is True
+    # Frames 2-4 are accepted matches, so the association rationale is recorded.
+    assert metrics["cecs"]["event_counts"]["association"] >= 1
+    sidecar = tmp_path / "out" / "MOT17-02-FRCNN-yolo-x-ocsi-cecs.json"
+    assert sidecar.exists()
+
+
 def test_mot17_public_detections_reads_det_txt_and_filters_confidence(tmp_path):
     seq = _make_seq(tmp_path, n_frames=3)
     (seq / "det" / "det.txt").write_text(
@@ -206,3 +231,36 @@ def test_run_mot17_dataset_scales_sequences_and_seeds_from_public_cache(tmp_path
     assert len(payload["runs"]) == 4
     assert {r["seed"] for r in payload["runs"]} == {1, 2}
     assert all([x["stage"] for x in r["results"]] == ["baseline", "memory", "feedback"] for r in payload["runs"])
+
+
+def test_run_mot17_sequence_fills_missing_frames_in_partial_cache(monkeypatch, tmp_path):
+    """A limited or interrupted run leaves a partial cache; it must self-heal."""
+    seq = _make_seq(tmp_path, n_frames=3)
+    cache_dir = str(tmp_path / "cache")
+    emb = np.array([1.0, 0.0], dtype=np.float32)
+    cache = FeatureCache(cache_dir)
+    key0 = mot17_tracking._cache_key(str(seq), "yolo", 0, 0.15)
+    cache.put(key0, detections_to_array([Detection([11, 20, 30, 40], 0.95, embedding=emb)]))
+
+    calls = []
+
+    def fake_build(seq_dir, cache_dir, cfg=None, limit=None):
+        calls.append(1)
+        target = FeatureCache(cache_dir)
+        frames = mot17_tracking.mot_image_files(seq_dir, limit)
+        for i in range(len(frames)):
+            key = mot17_tracking._cache_key(seq_dir, "yolo", i, 0.15)
+            target.put(key, detections_to_array([Detection([11 + i, 20, 30, 40], 0.95, embedding=emb)]))
+        return [
+            [Detection([11 + i, 20, 30, 40], 0.95, embedding=emb)] for i in range(len(frames))
+        ]
+
+    monkeypatch.setattr(mot17_tracking, "build_perception_cache", fake_build)
+
+    with pytest.warns(RuntimeWarning, match="incomplete perception cache"):
+        payload = run_mot17_sequence(
+            str(seq), cache_dir, str(tmp_path / "out"), stages=("baseline",)
+        )
+
+    assert calls == [1]
+    assert payload["frames"] == 3

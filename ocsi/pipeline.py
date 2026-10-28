@@ -54,17 +54,32 @@ def group_detections(
     return per_frame
 
 
+def track_sequence(
+    detections_per_frame: Sequence[Sequence[Detection]],
+    cfg: OCSIConfig,
+    conf: float = 1.0,
+) -> Tuple[List[ResultRow], OCSITracker]:
+    """Track a whole clip and return ``(rows, tracker)``.
+
+    The live tracker is returned so callers can read X-OCSI explanation
+    provenance (``tracker.cecs_history``, ``tracker.bank`` records) without
+    re-running the sequence.
+    """
+    tracker = OCSITracker(cfg)
+    rows: List[ResultRow] = []
+    for frame_idx, dets in enumerate(detections_per_frame):
+        outputs = tracker.update(list(dets))
+        rows.extend(tracker_rows(frame_idx, outputs, conf))
+    return rows, tracker
+
+
 def run_sequence(
     detections_per_frame: Sequence[Sequence[Detection]],
     cfg: OCSIConfig,
     conf: float = 1.0,
 ) -> List[ResultRow]:
     """Track a whole clip and return MOTChallenge result rows (1-indexed frames)."""
-    tracker = OCSITracker(cfg)
-    rows: List[ResultRow] = []
-    for frame_idx, dets in enumerate(detections_per_frame):
-        outputs = tracker.update(list(dets))
-        rows.extend(tracker_rows(frame_idx, outputs, conf))
+    rows, _ = track_sequence(detections_per_frame, cfg, conf)
     return rows
 
 

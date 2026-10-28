@@ -11,7 +11,7 @@ introspect nested dataclasses for YAML/dict loading.
 """
 import warnings
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass
@@ -108,6 +108,7 @@ class PerceptionConfig:
     """Detector / Re-ID / pose adapters (Phase 1)."""
 
     detector_weights: str = "yolov8s.pt"
+    det_imgsz: int = 640                # detector input resolution (also used for Grad-CAM)
     person_class_id: int = 0
     det_conf_threshold: float = 0.15
     reid_backend: str = "auto"          # "auto" (torchreid/OSNet -> resnet50 -> resnet18),
@@ -123,12 +124,35 @@ class PerceptionConfig:
 
 
 @dataclass
+class XAIConfig:
+    """Cross-stage explainability + CECS configuration (X-OCSI)."""
+
+    enabled: bool = False
+    use_gradcam: bool = True
+    cam_layer: Optional[str] = None
+    store_heatmaps: bool = False
+    heatmap_size: Tuple[int, int] = (224, 224)
+    # CECS weights (paper Eq. 11)
+    w_s: float = 0.34
+    w_t: float = 0.33
+    w_i: float = 0.33
+    # CECS parameters
+    identity_uncertainty_weight: float = 1.0
+    reliability_weight: float = 1.0
+    temporal_epsilon: float = 1e-9
+    # Fidelity / evaluation
+    fidelity_steps: int = 50
+    perturbation_threshold: float = 0.5
+
+
+@dataclass
 class OCSIConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     contamination: ContaminationConfig = field(default_factory=ContaminationConfig)
     association: AssociationConfig = field(default_factory=AssociationConfig)
     behaviour: BehaviourConfig = field(default_factory=BehaviourConfig)
     perception: PerceptionConfig = field(default_factory=PerceptionConfig)
+    xai: XAIConfig = field(default_factory=XAIConfig)
 
     # ---- (de)serialization ----
     def to_dict(self) -> Dict[str, Any]:
@@ -200,9 +224,12 @@ def resolve_device(device: str = "auto") -> str:
     return requested
 
 
-# --- ablation presets: baseline -> +memory -> +behaviour feedback (paper §6.4, Table 7) ---
+# --- ablation presets: baseline -> +memory -> +gated feedback -> X-OCSI (paper §6.4, Table 7) ---
 
-ABLATION_STAGES = ("baseline", "memory", "adaptive_memory", "feedback")
+ABLATION_STAGES = ("baseline", "memory", "adaptive_memory", "feedback", "x-ocsi")
+
+# Accepted spellings for the full X-OCSI stage.
+_ABLATION_ALIASES = {"xai": "x-ocsi", "xocs": "x-ocsi", "x_ocsi": "x-ocsi"}
 
 
 def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
@@ -211,8 +238,11 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
     - ``baseline``  : short-term appearance only, no memory term, no behaviour.
     - ``memory``    : add the Object Memory Bank memory-similarity term.
     - ``adaptive_memory`` : memory with a data-calibrated reactivation gate.
-    - ``feedback``  : add confidence-gated behaviour feedback (full OCSI).
+    - ``feedback``  : add confidence-gated behaviour feedback (OCSI).
+    - ``x-ocsi``    : feedback + cross-stage explainability and CECS (aliases:
+      ``xai``, ``xocs``, ``x_ocsi``).
     """
+    stage = _ABLATION_ALIASES.get(stage, stage)
     if stage not in ABLATION_STAGES:
         raise ValueError(f"unknown ablation stage {stage!r}; expected one of {ABLATION_STAGES}")
     cfg = OCSIConfig.from_dict(config.to_dict())  # deep copy via round-trip
@@ -223,6 +253,7 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
         cfg.association.adaptive_weights = False
         cfg.behaviour.enabled = False
         cfg.contamination.enabled = False
+        cfg.xai.enabled = False
     elif stage == "memory":
         cfg.association.use_memory = True
         cfg.association.reactivation = True    # memory bank persists identity across occlusion
@@ -230,6 +261,7 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
         cfg.association.adaptive_weights = False
         cfg.behaviour.enabled = False
         cfg.contamination.enabled = True
+        cfg.xai.enabled = False
     elif stage == "adaptive_memory":
         cfg.association.use_memory = True
         cfg.association.reactivation = True
@@ -237,6 +269,7 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
         cfg.association.adaptive_weights = False
         cfg.behaviour.enabled = False
         cfg.contamination.enabled = True
+        cfg.xai.enabled = False
     elif stage == "feedback":
         cfg.association.use_memory = True
         cfg.association.reactivation = True
@@ -244,4 +277,14 @@ def apply_ablation(config: OCSIConfig, stage: str) -> OCSIConfig:
         cfg.association.adaptive_weights = True
         cfg.behaviour.enabled = True
         cfg.contamination.enabled = True
+        cfg.xai.enabled = False
+    elif stage == "x-ocsi":
+        # X-OCSI: enable cross-stage explainability + CECS on top of feedback
+        cfg.association.use_memory = True
+        cfg.association.reactivation = True
+        cfg.association.adaptive_reactivation = False
+        cfg.association.adaptive_weights = True
+        cfg.behaviour.enabled = True
+        cfg.contamination.enabled = True
+        cfg.xai.enabled = True
     return cfg

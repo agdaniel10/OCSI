@@ -29,6 +29,12 @@ class FeatureCache:
     def _path(self, key: str) -> str:
         return os.path.join(self.root, key + ".npy")
 
+    def path(self, key: str, suffix: str = ".npy") -> Optional[str]:
+        """On-disk path for ``key`` with an alternative suffix (``None`` if memory-only)."""
+        if not self.root:
+            return None
+        return os.path.join(self.root, key + suffix)
+
     def has(self, key: str) -> bool:
         if self._mem is not None and key in self._mem:
             return True

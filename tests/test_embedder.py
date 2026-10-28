@@ -89,3 +89,30 @@ def test_from_bgr_matches_manual_rgb_conversion():
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     boxes = [np.array([10.0, 10.0, 50.0, 100.0])]
     np.testing.assert_allclose(emb.from_bgr(bgr, boxes), emb(rgb, boxes), atol=1e-6)
+
+
+def test_auto_backend_degrades_to_random_init_when_weights_are_unavailable(monkeypatch):
+    """Offline kernels must not abort a cache build when the download fails."""
+    import sys
+
+    import torchvision.models as tv
+
+    monkeypatch.setitem(sys.modules, "torchreid", None)      # force ImportError
+    real_resnet18 = tv.resnet18
+
+    def offline_resnet50(*args, **kwargs):
+        raise RuntimeError("no internet")
+
+    def offline_resnet18(*args, **kwargs):
+        if kwargs.get("weights") == "DEFAULT":
+            raise RuntimeError("no internet")
+        return real_resnet18(weights=None)
+
+    monkeypatch.setattr(tv, "resnet50", offline_resnet50)
+    monkeypatch.setattr(tv, "resnet18", offline_resnet18)
+
+    with pytest.warns(RuntimeWarning, match="random init"):
+        emb = ReIDEmbedder(PerceptionConfig(reid_backend="auto", reid_pretrained=True))
+
+    assert emb.backend_name == "torchvision:resnet18"
+    assert emb.dim == 512

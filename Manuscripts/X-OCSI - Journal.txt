@@ -1,0 +1,342 @@
+
+X-OCSI: Identity-Persistent Cross-Stage Explainable Object-Centric Surveillance Intelligence for Detection, Tracking and Temporal Human Activity Recognition
+
+Atiku Baba Shidawa¹, Gital Abdulsalam², Haruna Chiroma3, Achi Aaron Unimke 4, 
+Agada Unogwu Aboh5, Zahradeen Yakubu6, Badamasi Imam Ya’u 7, Aliyu Mohammed8
+
+1, National Institute for Policy and Strategic Studies, NIPSS, Kuru -Nigeria
+2,6,7,8 Abubakar Tafawa Balewa University, Nigeria
+3 University of Hafr Al Batin, Saudi Arabia
+4Higher School of Economics, Moscow.
+5University of Jos, Nigeria
+Abstract
+Automated video surveillance increasingly combines person detection, multi-object tracking and human activity recognition, but the evidential chain linking these stages remains difficult to audit. A spatially plausible detection can feed an incorrect identity association, and a temporal classifier can subsequently produce a confident activity label for the wrong individual. This paper develops X-OCSI, an identity-persistent, cross-stage explainable Object-Centric Surveillance Intelligence framework that treats each tracked person as a continuing semantic entity rather than a succession of frame-level detections. The framework integrates five functions: perception, identity association, object memory, behaviour reasoning and explanation intelligence. Detection evidence is exposed through spatial attribution; identity association is decomposed into appearance, motion, spatial, memory and confidence-gated behavioural contributions; and activity decisions are accompanied by temporal saliency. A quality-controlled Object Memory Bank retains cue provenance and supports reactivation after occlusion, while behaviour feedback is permitted to influence association only when semantic confidence and temporal validity satisfy explicit gates. The principal contribution is Cross-Stage Explanation Consistency (CECS), an identity-conditioned measure that tests whether detection evidence, tracking reliability and temporally salient activity evidence remain coherent for the same object through time. The evaluation design combines MOT17/MOT20 with person-centred action benchmarks, controlled occlusion stress tests, cross-dataset generalisation, fidelity and perturbation analysis, ablation studies, statistical testing and deployment latency. Preliminary OCSI tracking evidence shows that memory and feedback can reduce identity switches on selected sequences, but also reveals sequence-dependent failure, motivating the proposed gating and consistency analysis. X-OCSI therefore shifts explainable surveillance from isolated heatmaps toward an auditable, identity-aware account of how perception, association and temporal interpretation jointly produce a decision.
+Keywords: Explainable artificial intelligence, multi-object tracking, human activity recognition, object-centric surveillance, identity continuity, temporal saliency, Grad-CAM, trustworthy computer vision.
+I. INTRODUCTION
+Video surveillance is no longer limited to recording scenes. Contemporary systems detect people, preserve identities across frames and infer behaviour from temporal evidence. These functions are computationally connected, yet they are commonly developed and interpreted as separate modules. This separation matters because errors propagate. A weak detection can fragment a track, an association error can transfer identity, and the resulting sequence can lead an activity recogniser to describe the behaviour of the wrong person. Recent tracking reviews continue to identify occlusion, truncation, appearance ambiguity, camera motion and identity preservation as persistent challenges [1], [4].
+Explainable AI has improved the visibility of deep visual models, but most explanations remain local to one stage. Spatial attribution methods can reveal where a detector or classifier concentrates, while temporal attribution can identify influential frames. Neither alone establishes that the evidence belonged to the same individual throughout the sequence. In surveillance, this missing identity link is consequential: a convincing heatmap is of limited value if the underlying trajectory has already switched from one person to another.
+Recent tracking research also narrows the novelty that can reasonably be claimed. Object memory, long/short-term memory and occlusion-aware memory mechanisms are increasingly used to preserve targets under appearance change and visibility loss [3], [4], [7]–[9]. X-OCSI therefore does not claim memory itself as novel. Its contribution lies in using persistent identity as the common reference for explanation across detection, association and temporal activity understanding, while exposing how memory and behaviour influence identity decisions.
+The paper makes five contributions: (1) an identity-persistent object state that binds predictions and explanations to the same semantic entity; (2) an explainable multi-cue association function whose component contributions are retained for audit; (3) confidence- and time-gated behaviour feedback for association refinement and reactivation; (4) CECS, which measures cross-stage explanation coherence for each identity; and (5) an evaluation protocol that tests predictive performance, explanation fidelity, occlusion robustness, generalisation and computational cost rather than relying on visual plausibility.
+II. RELATED WORK AND NOVELTY POSITIONING
+A. Detection and Person-Centred Perception
+Fast one-stage detectors and transformer detectors provide complementary routes to person localisation. Their architectural differences are not the focus of X-OCSI; the detector is replaceable provided that it yields a person box, confidence, features and a target score suitable for attribution [10]–[13]. The important design requirement is provenance: spatial evidence produced at detection time must remain linked to the identity that later accumulates temporal evidence.
+B. Identity Tracking, Occlusion and Memory
+DeepSORT, ByteTrack, BoT-SORT and transformer-based trackers have progressively strengthened data association through appearance, motion, low-confidence detections and learned association [14], [20]. Recent 2025–2026 literature confirms that occlusion remains a major source of fragmentation and re-identification failure and increasingly uses explicit occlusion reasoning or multiple memory stores [1], [4], [7], [9]. Consequently, X-OCSI positions the Object Memory Bank as an enabling component rather than the principal novelty. Its distinctive role is to preserve not only identity cues but also the provenance of explanations used to create, update or reactivate an identity.
+C. Temporal Human Activity Understanding
+Human activity recognition has progressed from two-stream and 3-D convolutional models to attention-based and transformer architectures [21],[28]. Kinetics, AVA and ActivityNet provide complementary pre-training, person-centred action and untrimmed activity benchmarks [29], [31]. Most HAR models assume that the input clip corresponds to the intended subject. X-OCSI makes that assumption testable by constructing activity windows from persistent tracked identities and by comparing activity saliency with identity reliability.
+D. Explainable Video Intelligence
+Grad-CAM, integrated gradients, perturbation methods and feature-attribution techniques are widely used to expose visual-model evidence [32], [39]. Recent HAR and surveillance studies increasingly combine spatial explanations with temporal reasoning, reinforcing the need to validate both where and when a model obtains evidence [5], [6]. However, spatial-temporal explanation is not equivalent to identity-aware explanation. X-OCSI focuses on the unresolved link between explanation and identity continuity: whether the spatial evidence, association rationale and temporally influential frames form a coherent account of one tracked person.
+E. Defensible Novelty Boundary
+Capability
+Already established in literature
+X-OCSI-specific contribution
+Object memory
+Memory/dual-memory trackers for occlusion
+Stores cue and explanation provenance under a persistent identity
+Spatial XAI
+Grad-CAM and related attribution
+Identity-linked detector evidence
+Temporal XAI
+Frame/token saliency and perturbation
+Temporal evidence conditioned on tracked identity reliability
+Data association
+Appearance, motion, transformer association
+Auditable cue decomposition including gated behaviour
+Pipeline XAI
+Stage-specific explanations
+Cross-stage identity-conditioned consistency (CECS)
+
+
+
+III. X-OCSI METHOD
+A. Persistent Object State
+O_i^t={id_i,b_i^t,c_i^t,a_i^t,m_i^t,τ_i^{1:t},p_i^t,h_i^t,e_i^t}                                    (1)
+For identity i at time t, the state retains geometry b, confidence c, appearance a, motion m, trajectory τ, pose/context p, behaviour h and explanation history e. Dormant identities remain addressable for a bounded reactivation interval.
+B. Detection Attribution
+α_k^y=(1/Z)Σ_uΣ_v ∂y/∂A_uv^k                                    (2)
+E_det^y=ReLU(Σ_k α_k^y A^k)                                    (3)
+The attribution map is projected to the original frame, normalized and stored with the target detection. Fidelity is later tested by deletion/insertion rather than inferred from visual appearance.
+C. Explainable Multi-Cue Association
+C_ij=λ_aC_app+λ_mC_motion+λ_sC_spatial+λ_MC_memory+g(h,t)λ_bC_behaviour                                    (4)
+g(h,t)=1[c_h≥θ_h]·exp(-Δt/τ_h)                                    (5)
+The assignment cost is decomposed into interpretable components. Behaviour is a secondary semantic cue, not a primary identity signal. It is activated only when activity confidence exceeds θ_h and decays with elapsed time. For each accepted match, X-OCSI stores q_ij=[q_app,q_motion,q_spatial,q_memory,q_behaviour], enabling later inspection of why an identity was maintained, rejected or reactivated.
+D. Quality-Controlled Object Memory
+M_(i,r)^t=β_rM_(i,r)^(t-1)+(1-β_r)x_(i,r)^t, if ρ_(i,r)^t≥θ_r                                    (6)
+Separate memory prototypes are maintained for appearance, motion, pose/context and behaviour. Low-quality observations do not update memory. Every accepted update records frame, confidence, cue type and explanation descriptor, allowing a reactivated track to expose which historical evidence supported the decision.
+E. Temporal Activity Recognition
+p_i=softmax(H(X_i)), X_i=[x_i^(t-L+1),…,x_i^t]                                    (7)
+X_i is formed only from observations assigned to identity i. Temporal saliency s_i^t is obtained using a model-compatible attribution method and is validated by removing or masking the most salient frames. The Oracle-ID experiment uses ground-truth identities with the same HAR model to estimate how much activity error is caused upstream by tracking.
+F. Cross-Stage Explanation Consistency
+S_spatial=IoU_soft(E_det,E_act)                                    (8)
+S_temporal=(Σ_t s_t r_t)/(Σ_t s_t+ε)                                    (9)
+S_identity=1-(Σ_t s_t u_t)/(Σ_t s_t+ε)                                    (10)
+CECS=w_sS_spatial+w_tS_temporal+w_iS_identity, Σw=1                                    (11)
+S_spatial measures overlap between detection and activity spatial evidence; S_temporal weights salient activity frames by tracking reliability r_t; S_identity penalizes saliency concentrated on identity-uncertain frames u_t. CECS is explicitly a consistency measure, not a truth score. Its value must be established empirically by testing whether it separates correct identities/activities from failure cases.
+IV. HYPOTHESES AND EXPERIMENTAL DESIGN
+A. Testable Hypotheses
+Hypothesis
+Test
+H1: OMB and gated feedback improve identity continuity
+B0 vs B1 vs B2/X-OCSI on HOTA, IDF1, AssA and IDsw
+H2: Identity continuity improves HAR
+Oracle-ID, B0, B1 and X-OCSI comparison
+H3: CECS is higher for correct than switched identities
+CECS distributions + paired/non-parametric tests
+H4: CECS is higher for correct than incorrect activity predictions
+CECS by HAR correctness + effect size
+H5: CECS degrades with increasing occlusion
+Controlled visibility bands and trend analysis
+H6: CECS adds failure information beyond model confidence
+ROC/AUC or logistic model: confidence vs confidence+CECS
+H7: Behaviour gating prevents semantic drift
+Gated vs ungated behaviour ablation
+
+B. Datasets
+Dataset
+Function
+Primary outcomes
+MOT17
+Standard pedestrian tracking
+HOTA, MOTA, IDF1, AssA, DetA, IDsw
+MOT20
+Dense-crowd stress test
+Identity continuity under severe occlusion
+AVA
+Person-centred actions
+Action mAP, identity-conditioned temporal explanation
+Kinetics
+HAR representation pre-training
+Top-1/Top-5 pre-training
+ActivityNet / second action dataset
+Cross-dataset temporal generalisation
+mAP and explanation degradation
+
+Because no single benchmark provides complete MOT identities, rich action labels and explanation ground truth, results are reported by task and supplemented with an integrated identity–activity evaluation subset. Cross-benchmark claims are avoided.
+C. Baselines and Ablations
+ID
+System
+Question
+B0
+Detector + tracker + HAR
+Conventional modular baseline
+B1
+B0 + Object Memory Bank
+Does persistent memory help?
+B2
+B1 + gated behaviour feedback
+Does semantic feedback improve association?
+B3
+B1 + stage-wise XAI, no feedback
+Does explanation alone change prediction?
+B4
+B2 with ungated behaviour
+Does gating prevent semantic drift?
+X-OCSI
+B1 + gated feedback + XAI + CECS
+Full system
+Oracle-ID
+Ground-truth identity + same HAR
+Upper bound on identity-induced HAR error
+
+D. Controlled Occlusion Stress Test
+To isolate robustness from dataset composition, evaluation sequences are additionally stratified by visible-person ratio: 80–100%, 60–80%, 40–60%, 20–40% and <20%. Where benchmark annotations do not directly provide visibility, occlusion is estimated from overlap/annotation metadata and complemented by a synthetic-mask stress test applied only to the evaluation copy. For each band, report IDF1, IDsw, HAR performance, CECS and explanation fidelity. The principal question is not whether X-OCSI is invariant to occlusion, but whether performance and explanation coherence degrade more gracefully than the modular baseline.
+E. Cross-Dataset Generalisation
+The activity/explanation module should be trained or tuned on one source domain and evaluated without target-domain fine-tuning on a second dataset or held-out surveillance domain. Report absolute performance and relative degradation in HAR, temporal fidelity and CECS. This experiment tests whether the explanation mechanism is tied to one dataset's visual statistics.
+F. Metrics and Statistical Analysis
+Dimension
+Measures
+Detection
+Precision, Recall, AP50, mAP50:95
+Tracking
+HOTA, MOTA, IDF1, AssA, DetA, IDsw, fragmentation
+HAR
+mAP, macro-F1, Top-1/Top-5 where applicable
+Spatial XAI
+Energy-in-box, pointing game, deletion/insertion AUC
+Temporal XAI
+Temporal deletion/insertion, salient-frame perturbation
+Explanation robustness
+Similarity under benign perturbation
+Cross-stage
+S_spatial, S_temporal, S_identity, CECS
+Deployment
+FPS, latency, VRAM, XAI overhead
+
+Stochastic configurations should use at least three fixed seeds where feasible. Sequence-level paired differences are reported with 95% confidence intervals and effect sizes. Normality is checked before paired t-tests; otherwise Wilcoxon signed-rank tests are used. Holm correction controls family-wise error across ablations. For CECS discrimination experiments, report ROC-AUC with bootstrap confidence intervals and compare confidence-only against confidence-plus-CECS models.
+V. PRELIMINARY EVIDENCE AND REQUIRED MAIN RESULTS
+Existing OCSI tracking runs provide preliminary evidence for the identity-continuity premise but are not treated as completed X-OCSI validation. On MOT17-02, memory reduced identity switches from 110 to 92 and behaviour feedback reduced them further to 70, while IDF1 increased from 0.358 to 0.361. On MOT17-10, feedback reduced identity switches from 249 to 216 and increased IDF1 from 0.449 to 0.454. MOT20-03 provides a necessary negative case: memory reduced switches from 3,199 to 3,142 but IDF1 fell from 0.513 to 0.504. This sequence dependence argues against an unconditional memory claim and supports the proposed quality gates, controlled ablations and failure analysis.
+Sequence
+Configuration
+MOTA
+IDF1
+IDsw
+MOT17-02
+Baseline
+0.256
+0.358
+110
+MOT17-02
+Memory
+0.257
+0.361
+92
+MOT17-02
+Feedback
+0.258
+0.361
+70
+MOT17-10
+Baseline
+0.454
+0.449
+249
+MOT17-10
+Feedback
+0.457
+0.454
+216
+MOT20-01
+Baseline
+0.505
+0.547
+110
+MOT20-01
+Memory
+—
+0.549
+109
+MOT20-03
+Baseline
+0.476
+0.513
+3,199
+MOT20-03
+Memory
+—
+0.504
+3,142
+
+A. Publication-Grade Result Matrix
+Result block
+Minimum evidence required for final submission
+R1 Tracking
+B0–X-OCSI: HOTA, IDF1, AssA, IDsw, FPS on MOT17 and MOT20
+R2 HAR
+Oracle-ID/B0/B1/X-OCSI: mAP/F1, including ID-switch subset
+R3 Spatial fidelity
+Deletion/insertion curves, energy-in-box and qualitative examples
+R4 Temporal fidelity
+Salient-frame perturbation and deletion/insertion
+R5 CECS validation
+Correct vs incorrect ID/HAR, ROC-AUC, effect sizes
+R6 Occlusion
+Performance and CECS across visibility bands
+R7 Generalisation
+Source-to-target performance and explanation degradation
+R8 Efficiency
+Base inference vs continuous-XAI vs on-demand-XAI latency
+R9 Failure cases
+Crossing, long occlusion, similar appearance, false semantic feedback
+
+VI. PRACTICAL IMPLEMENTATION AND REPRODUCIBILITY
+A deployment-oriented implementation should separate the real-time path from expensive explanation analysis. Detection and association run at frame rate; activity inference runs at a configurable stride; compact explanation descriptors are stored continuously; and full Grad-CAM/perturbation explanations are generated for sampled events, failures or policy-relevant alerts. This design permits direct measurement of the accuracy–explainability–latency trade-off.
+Component
+Recommended implementation
+Reproducibility record
+Detector
+YOLO-family or DETR-style model
+weights, resolution, confidence/NMS thresholds
+Tracker
+DeepSORT/BoT-SORT + X-OCSI association
+all λ weights, gates and max-age
+Re-ID
+Strong embedding model
+checkpoint and embedding dimension
+Memory
+Quality-controlled prototypes
+β, θ, retention/reactivation window
+HAR
+TCN/BiGRU/SlowFast/video transformer
+window, stride, pre-training
+XAI
+Grad-CAM + temporal perturbation/IG
+target layer/token and normalization
+CECS
+Eq. (11)
+weights fixed on validation data only
+Hardware
+GPU workstation
+GPU/VRAM, CPU/RAM, CUDA, software versions
+
+VII. DISCUSSION
+The scientific value of X-OCSI lies in preserving the evidential chain. A spatial heatmap can be locally convincing while the track identity is globally wrong. Identity-conditioned explanation makes that contradiction measurable rather than hidden.
+The preliminary results already show why the framework should not be presented as uniformly beneficial. Memory and feedback reduce identity switches on some sequences, whereas MOT20-03 shows that fewer switches can coexist with lower IDF1. The final discussion must therefore focus on conditions under which memory and semantic feedback help, fail or become unreliable.
+CECS should be treated conservatively. High consistency cannot prove a correct decision; it indicates that the stages agree about their evidence. Its strongest empirical role will be demonstrated if CECS separates correct from erroneous identities or activities and adds failure-discrimination value beyond confidence alone.
+Behaviour feedback creates a distinctive opportunity and risk. When two visually similar tracks compete after occlusion, a stable activity pattern may support reactivation. If the activity prediction is wrong, however, the same mechanism can reinforce an incorrect identity. Confidence gating, time decay and the ungated ablation are therefore central to the validity of the approach.
+Explainability also does not resolve the governance risks of surveillance. Practical use requires data minimisation, access control, retention limits, bias assessment, uncertainty reporting and meaningful human review. X-OCSI is designed to improve auditability, not to justify autonomous consequential decisions.
+VIII. LIMITATIONS
+X-OCSI currently faces four methodological limits. First, there is no standard public benchmark jointly annotating persistent identity, rich activity and explanation ground truth. Second, post-hoc attribution may be unstable or non-causal, so fidelity must be tested rather than assumed. Third, behaviour-guided association can propagate semantic error despite gating. Fourth, full explanation generation increases latency. These limitations are addressed experimentally through multi-benchmark reporting, perturbation tests, ungated/gated ablations, controlled failure cases and separate latency measurements, but they cannot be eliminated by architecture design alone.
+IX. CONCLUSION
+X-OCSI reframes explainable surveillance around persistent identity. Instead of explaining detection, tracking and activity recognition as unrelated outputs, it binds spatial evidence, association rationale, object memory and temporal saliency to the same semantic entity. The framework's central contribution is not memory or Grad-CAM in isolation, but an auditable cross-stage account of how an identity is observed, maintained and interpreted. CECS provides a testable mechanism for measuring that coherence, while confidence-gated behaviour feedback addresses difficult identity recovery without treating semantic predictions as infallible. The proposed experimental programme is designed to determine where these mechanisms genuinely improve tracking and activity understanding, where they fail, and whether their explanations are faithful enough to support human review. Completion of the full result matrix, particularly CECS discrimination, controlled occlusion, cross-dataset generalisation and latency analysis, is the remaining requirement before strong Q1 empirical claims can be made.
+	REFERENCES	
+[1] Z. Guan et al., “Multi-object tracking review: retrospective and emerging trend,” Artificial Intelligence Review, vol. 58, art. 235, 2025. https://doi.org/10.1007/s10462-025-11212-y
+[2] S. Li, H. Ren, X. Xie, and Y. Cao, “A review of multi-object tracking in recent times,” IET Computer Vision, vol. 19, e70010, 2025. https://doi.org/10.1049/cvi2.70010
+[3] G. Zhao et al., “A review of object tracking based on deep learning,” Neurocomputing, vol. 651, 130988, 2025. https://doi.org/10.1016/j.neucom.2025.130988
+[4] W. Zhang et al.,  “Facing challenges: A survey of object tracking,” Digital Signal Processing, vol. 161, 105082, 2025. https://doi.org/10.1016/j.dsp.2025.105082
+[5] F. Tempel et al., “Choose your explanation: A comparison of SHAP and Grad-CAM in human activity recognition,” Applied Intelligence, vol. 55, art. 1107, 2025. https://doi.org/10.1007/s10489-025-06968-3
+[6] J. Manoharan and Y. Sivagnanam, “A novel human action recognition model by Grad-CAM visualization …,” International Journal of Computational Intelligence Systems, vol. 18, art. 118, 2025. https://doi.org/10.1007/s44196-025-00848-x
+[7] G. Carretero et al., “Multiple object tracker with integrated embedding-based optimization and occlusion-aware variants,” Information Sciences, vol. 749, 123533, 2026. https://doi.org/10.1016/j.ins.2026.123533
+[8] Z. Chen et al., “Occlusion-aware visual object tracking with explicit temporal state modeling and dual-memory mechanism,” Pattern Recognition, 2026, art. 114155. https://doi.org/10.1016/j.patcog.2026.114155
+[9] Z. Rui et al., “Combining short-term and long-term memory for robust visual tracking,” Image and Vision Computing, vol. 166, 105850, 2026. https://doi.org/10.1016/j.imavis.2025.105850
+[10] N. Carion et al., “End-to-end object detection with transformers,” in Proc. ECCV, 2020, pp. 213–229. https://doi.org/10.1007/978-3-030-58452-8_13
+[11] Z. Zou et al., “Object detection in 20 years: A survey,” Proceedings of the IEEE, vol. 111, no. 3, pp. 257–276, 2023. https://doi.org/10.1109/JPROC.2023.3238520
+[12] S. Ren et al., “Faster R-CNN: Towards real-time object detection with region proposal networks,” IEEE TPAMI, vol. 39, no. 6, pp. 1137–1149, 2017. https://doi.org/10.1109/TPAMI.2016.2577031
+[13] J. Redmon and A. Farhadi, “YOLOv3: An incremental improvement,” arXiv, 2018. https://doi.org/10.48550/arXiv.1804.02767
+[14] N. Wojke, A. Bewley, and D. Paulus, “Simple online and realtime tracking with a deep association metric,” in Proc. IEEE ICIP, 2017. https://doi.org/10.1109/ICIP.2017.8296962
+[15] Y. Zhang et al., “ByteTrack: Multi-object tracking by associating every detection box,” in ECCV, 2022. https://doi.org/10.1007/978-3-031-20047-2_1
+[16] N. Aharon et al., “BoT-SORT: Robust associations multi-pedestrian tracking,” arXiv, 2022. https://doi.org/10.48550/arXiv.2206.14651
+[17] Y. Du et al., “StrongSORT: Make DeepSORT great again,” IEEE Transactions on Multimedia, vol. 25, pp. 8725–8737, 2023. https://doi.org/10.1109/TMM.2023.3240881
+[18] T. Meinhardt et al., “TrackFormer: Multi-object tracking with transformers,” in Proc. CVPR, 2022. https://doi.org/10.1109/CVPR52688.2022.00864
+[19] F. Zeng et al., “MOTR: End-to-end multiple-object tracking with transformer,” in ECCV, 2022. https://doi.org/10.1007/978-3-031-19812-0_38
+[20] P. Wang et al., “LA-MOTR: End-to-end multi-object tracking by learnable association,” in Proc. IEEE/CVF ICCV, 2025. https://doi.org/10.1109/ICCV51701.2025.01156
+[21] K. Simonyan and A. Zisserman, “Two-stream convolutional networks for action recognition in videos,” NeurIPS, 2014. https://proceedings.neurips.cc/paper/2014/hash/00ec53c4682d36f5c4359f4ae7bd7ba1-Abstract.html
+[22] J. Carreira and A. Zisserman, “Quo Vadis, action recognition? A new model and the Kinetics dataset,” in Proc. CVPR, 2017. https://doi.org/10.1109/CVPR.2017.502
+[23] C. Feichtenhofer et al., “SlowFast networks for video recognition,” International Journal of Computer Vision, vol. 129, pp. 3052–3068, 2021. https://doi.org/10.1007/s11263-021-01493-5
+[24] G. Bertasius et al., “Is space-time attention all you need for video understanding?” ICML, 2021. https://proceedings.mlr.press/v139/bertasius21a.html
+[25] A. Arnab et al., “ViViT: A video vision transformer,” in Proc. ICCV, 2021. https://doi.org/10.1109/ICCV48922.2021.00676
+[26] H. Fan et al., “Multiscale vision transformers,” in Proc. ICCV, 2021. https://doi.org/10.1109/ICCV48922.2021.00675
+[27] Z. Tong et al., “VideoMAE: Masked autoencoders are data-efficient learners for self-supervised video pre-training,” NeurIPS, 2022. https://proceedings.neurips.cc/paper_files/paper/2022/hash/416f9cb3276121c42eebb86352a4354a-Abstract-Conference.html
+[28] Y. Wang et al., “InternVideo: General video foundation models via generative and discriminative learning,” arXiv, 2022. https://doi.org/10.48550/arXiv.2212.03191
+[29] C. Gu et al., “AVA: A video dataset of spatio-temporally localized atomic visual actions,” in Proc. CVPR, 2018. https://doi.org/10.1109/CVPR.2018.00633
+[30] W. Kay et al., “The Kinetics human action video dataset,” arXiv, 2017. https://doi.org/10.48550/arXiv.1705.06950
+[31] F. Caba Heilbron et al., “ActivityNet: A large-scale video benchmark for human activity understanding,” in Proc. CVPR, 2015. https://doi.org/10.1109/CVPR.2015.7298698
+[32] R. R. Selvaraju et al., “Grad-CAM: Visual explanations from deep networks via gradient-based localization,” International Journal of Computer Vision, vol. 128, pp. 336–359, 2020. https://doi.org/10.1007/s11263-019-01228-7
+[33] A. Barredo Arrieta et al., “Explainable Artificial Intelligence (XAI): Concepts, taxonomies, opportunities and challenges toward responsible AI,” Information Fusion, vol. 58, pp. 82–115, 2020. https://doi.org/10.1016/j.inffus.2019.12.012
+[34] M. T. Ribeiro et al., “Why should I trust you? Explaining the predictions of any classifier,” in Proc. ACM KDD, 2016. https://doi.org/10.1145/2939672.2939778
+[35] S. M. Lundberg and S.-I. Lee, “A unified approach to interpreting model predictions,” NeurIPS, 2017. https://proceedings.neurips.cc/paper/2017/hash/8a20a8621978632d76c43dfd28b67767-Abstract.html
+[36] M. Sundararajan et al., “Axiomatic attribution for deep networks,” ICML, 2017. https://proceedings.mlr.press/v70/sundararajan17a.html
+[37] R. C. Fong and A. Vedaldi, “Interpretable explanations of black boxes by meaningful perturbation,” in Proc. ICCV, 2017. https://doi.org/10.1109/ICCV.2017.371
+[38] V. Petsiuk et al., “RISE: Randomized input sampling for explanation of black-box models,” BMVC, 2018. https://doi.org/10.5244/C.32.151
+[39] J. Adebayo et al., “Sanity checks for saliency maps,” NeurIPS, 2018. https://proceedings.neurips.cc/paper/2018/hash/294a8ed24b1ad22ec2e7efea049b8737-Abstract.html
+[40] S. Hooker et al., “A benchmark for interpretability methods in deep neural networks,” NeurIPS, 2019. https://proceedings.neurips.cc/paper/2019/hash/fe4b8556000d0f0cae99daa5c5c5a410-Abstract.html
+[41] D. Gunning and D. Aha, “DARPA’s Explainable Artificial Intelligence (XAI) program,” AI Magazine, vol. 40, no. 2, pp. 44–58, 2019. https://doi.org/10.1609/aimag.v40i2.2850
+[42] P. Dendorfer et al., “MOTChallenge: A benchmark for single-camera multiple target tracking,” International Journal of Computer Vision, vol. 129, pp. 845–881, 2021. https://doi.org/10.1007/s11263-020-01393-0
+[43] J. Luiten et al., “HOTA: A higher order metric for evaluating multi-object tracking,” International Journal of Computer Vision, vol. 129, pp. 548–578, 2021. https://doi.org/10.1007/s11263-020-01375-2
+[44] A. Milan et al., “MOT16: A benchmark for multi-object tracking,” arXiv, 2016. https://doi.org/10.48550/arXiv.1603.00831
+[45] S. Shao et al., “CrowdHuman: A benchmark for detecting human in a crowd,” arXiv, 2018. https://doi.org/10.48550/arXiv.1805.00123
+[46] L. Zheng et al., “Scalable person re-identification: A benchmark,” in Proc. ICCV, 2015. https://doi.org/10.1109/ICCV.2015.133
+[47] Z. Zhong et al., “Re-ranking person re-identification with k-reciprocal encoding,” in Proc. CVPR, 2017. https://doi.org/10.1109/CVPR.2017.389
+[48] Y. He et al., “TransReID: Transformer-based object re-identification,” in Proc. ICCV, 2021. https://doi.org/10.1109/ICCV48922.2021.01477
+[49] M. Li et al., “Advancing multi-object tracking through occlusion-awareness and trajectory optimization,” Knowledge-Based Systems, 2025, art. 112930. https://doi.org/10.1016/j.knosys.2024.112930
+[50] S. Bilakeri and K. A. Kotegar, “A review: Recent advancements in online private mode multiobject tracking,” IEEE Transactions on Artificial Intelligence, 2025. https://doi.org/10.1109/TAI.2025.3572854
+[51] T. S. Qureshi et al., “A systematic literature review on human activity recognition using smart devices: Advances, challenges, and future directions,” Artificial Intelligence Review, vol. 58, art. 276, 2025. https://doi.org/10.1007/s10462-025-11275-x
+[52] A. Mohamed et al., “Explainable artificial intelligence: A systematic review of progress and challenges,” Intelligent Systems with Applications, vol. 28, 200595, 2025. https://doi.org/10.1016/j.iswa.2025.200595
+[53] S. M. Khan et al., “Human action recognition: A paradigm of best deep learning features selection and serial based extended fusion,” Sensors, vol. 21, no. 23, 2021. https://doi.org/10.3390/s21237941
+[54] M. S. Islam et al., “Deep learning-based human activity recognition using wearable sensors: A systematic review,” Sensors, 2022. https://doi.org/10.3390/s22207998
+[55] S. Tang et al., “CityPersons: A diverse dataset for pedestrian detection,” in Proc. CVPR, 2017. https://doi.org/10.1109/CVPR.2017.474
+[56] A. Hermans et al., “In defense of the triplet loss for person re-identification,” arXiv, 2017. https://doi.org/10.48550/arXiv.1703.07737
+[57] P. Sun et al., “TransTrack: Multiple-object tracking with transformer,” arXiv, 2020. https://doi.org/10.48550/arXiv.2012.15460
+[58] C. Molnar, Interpretable Machine Learning, 2nd ed., 2022. https://christophm.github.io/interpretable-ml-book/
+[59] M. Samek et al., “Explaining deep neural networks and beyond: A review of methods and applications,” Proceedings of the IEEE, vol. 109, no. 3, pp. 247–278, 2021. https://doi.org/10.1109/JPROC.2021.3060483
+[60] A. Adadi and M. Berrada, “Peeking inside the black-box: A survey on explainable artificial intelligence (XAI),” IEEE Access, vol. 6, pp. 52138–52160, 2018. https://doi.org/10.1109/ACCESS.2018.2870052
+

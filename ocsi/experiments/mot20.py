@@ -21,6 +21,7 @@ from ..eval.mot_io import read_gt, read_results
 from ..types import Detection
 from .mot17_tracking import (
     _attach_embeddings_to_frames,
+    _cache_cfg_for_stages,
     _seq_name,
     array_to_detections,
     build_perception_cache,
@@ -103,14 +104,18 @@ def run_mot20_sequence(
         base_cfg = OCSIConfig.from_dict(base_cfg.to_dict())
         base_cfg.perception.det_conf_threshold = float(det_conf_threshold)
 
-    # Build/load the MOT20 cache
+    # Build/load the MOT20 cache. Attribution must be requested here whenever a
+    # stage needs it: the delegated run_mot17_sequence call will reuse this cache
+    # (rebuild_cache=False), so building it without evidence would silently yield
+    # an empty CECS table.
+    cache_cfg = _cache_cfg_for_stages(base_cfg, stages)
     if rebuild_cache or not os.path.exists(cache_dir):
         if detection_source == "public":
             detections = build_mot20_public_detection_cache(
                 seq_dir, cache_dir, base_cfg, limit, base_cfg.perception.det_conf_threshold
             )
         else:
-            detections = build_perception_cache(seq_dir, cache_dir, base_cfg, limit)
+            detections = build_perception_cache(seq_dir, cache_dir, cache_cfg, limit)
     else:
         detections = load_cached_detections(
             seq_dir, cache_dir, limit, detection_source, base_cfg.perception.det_conf_threshold

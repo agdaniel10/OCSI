@@ -93,17 +93,66 @@ The `feedback` stage is included for consistent ablation bookkeeping, but MOT17
 has no action labels; behaviour feedback remains a separate synthetic-gating
 experiment.
 
+## Running X-OCSI on Kaggle
+
+CECS needs the detector attribution `E_det`, and only `detection_source="yolo"`
+produces it: MOT17's public `det.txt` files contain boxes but no detector to
+attribute. **Run the whole ablation table on YOLO detections** so the `x-ocsi`
+row is comparable with the rows above it; mixing public rows with a YOLO
+`x-ocsi` row compares different detections.
+
+```bash
+# in a Kaggle notebook cell, from the repository root
+!pip install -q ultralytics pyyaml    # torch/torchvision/opencv are preinstalled
+!python kaggle_xocsi.py --smoke      # 1 sequence, 30 frames, wiring check (~2 min on GPU)
+!python kaggle_xocsi.py              # full table, all MOT17 train sequences
+```
+
+`kaggle_xocsi.py` discovers `MOT17-*/img1` sequences with `gt/gt.txt` (deduping
+the DPM/FRCNN/SDP variants), runs
+`baseline, memory, adaptive_memory, feedback, x-ocsi` with
+`detection_source="yolo"`, prints IDF1/MOTA/IDsw plus CECS mean/count and
+attribution coverage, and writes `ocsi_outputs/xocsi-metrics.csv` plus one
+`*-cecs.json` trace per run. Useful flags: `--sequences`, `--limit`, `--seeds`,
+`--imgsz`, `--heatmap-size`, `--rebuild`.
+
+Practical notes:
+
+- Enable a GPU. Grad-CAM adds one backward pass per frame; on a P100/T4 the
+  full MOT17 train split is tens of minutes, on CPU it is hours.
+- Attribution is cached per detection in `<key>.xai.npz` sidecars, downsampled
+  to `cfg.xai.heatmap_size` (default 224×224) and quantised to `uint8`. A full
+  MOT17 sequence becomes a few tens of MB instead of tens of GB.
+- The cache key includes the detection source but **not** the weights, `imgsz`
+  or `heatmap_size`; pass `--rebuild` after changing any of them. A partial cache
+  (from `--smoke`, `--limit`, or an interrupted session) is detected and the
+  missing frames are built on the next run.
+- `/kaggle/working` is wiped between sessions. Copy `ocsi_outputs/` (or save it
+  as a notebook output) before stopping; re-running detection on a fresh
+  session rebuilds the cache from scratch.
+- `yolov8s.pt` and the ImageNet Re-ID weights are downloaded on first use
+  (needs internet). Without them Re-ID falls back to random init with a
+  warning — the run completes, but identity metrics are not meaningful.
+- A stage that enables X-OCSI but finds no attribution now reports
+  `cecs.num_cecs = 0` with an explicit `warning` and a `RuntimeWarning`, instead
+  of silently omitting the block.
+
+MOT17 still has no activity labels, so the temporal term is structurally wired
+but unvalidated there; report it as such.
+
 ## Layout
 
 ```
 ocsi/
   config.py         # all thresholds/weights (fills the paper's blank table); ablation presets
-  types.py          # Detection, TrackState, bbox helpers
+  types.py          # Detection, TrackState, bbox helpers, ExplanationEvent/ExplanationInput
   perception/       # Re-ID embedder + YOLO detector + feature cache       (Phase 1 ✓, pose TODO)
   memory/           # Object Memory Bank: record.py + bank.py             (Phase 2 ✓)
   motion/           # constant-velocity Kalman filter                     (Phase 3 ✓)
   identity/         # similarity, gating, Hungarian association, tracker  (Phase 3 ✓)
   behaviour/        # HAR (+ stub) and the confidence gate / feedback     (Phases 4-5)
+  explain/          # X-OCSI CECS + identity explanation provenance
+  xai/              # Grad-CAM, detection attribution, temporal saliency
   pipeline.py       # per-frame + full-sequence orchestration             (Phase 3.5 ✓)
   eval/             # MOT I/O + CLEAR-MOT/IDF1 metric + (TrackEval later)  (Phase 3.5 ✓)
 configs/default.yaml
@@ -139,7 +188,13 @@ tests/
   Aggregate: baseline MOTA 0.837 / IDF1 0.348 / IDsw 30 → +memory MOTA 0.964 / IDF1 0.789 /
   IDsw 5. (*L=40 > `max_age`=30: the bounded-memory retention cliff.) Run:
   `python -m ocsi.experiments.occlusion_recovery`.
-- **124 tests pass** (`python -m pytest -q` from the repository root).
+- **X-OCSI explanation wiring (engine + producers)**: `apply_ablation(cfg, "x-ocsi")`
+  enables cross-stage provenance + CECS; the tracker records
+  association/detection/temporal events per identity and `track_sequence` exposes
+  the live tracker. Producers are real: per-detection head Grad-CAM (`E_det`) and
+  perturbation-based HAR saliency (`s_t`), cached per frame. A trained HAR model
+  and label-dependent CECS validation remain TODO (MOT17 has no activity labels).
+- **177 tests pass** (`python -m pytest -q` from the repository root).
 
 ## Loophole Fixes (v1.1)
 
@@ -196,6 +251,88 @@ and the AI review:
 12. **Improved reliability proxy** (`ocsi/identity/tracker.py`):
     `_reliability` now combines detection confidence, match score, assignment margin,
     and cross-cue consistency (paper §3.4 step 8).
+
+## X-OCSI cross-stage explanations (paper §3.1–3.6)
+
+X-OCSI adds identity-persistent explainability on top of OCSI. It is **off by
+default** and enabled per run:
+
+```python
+from ocsi.config import OCSIConfig, apply_ablation
+
+cfg = apply_ablation(OCSIConfig(), "x-ocsi")   # aliases: "xai", "xocs", "x_ocsi"
+assert cfg.xai.enabled
+```
+
+The XAI/HAR layers attach evidence to each detection via `ExplanationInput`
+(`det_heatmap`, `act_heatmap`, `saliency`, `reliability`, `uncertainty`). The
+tracker then writes three event kinds to that identity's
+`MemoryRecord.explanation_history`:
+
+- `association` — the per-cue `q_ij` similarities, active weights, margin and
+  reliability, i.e. why the identity was maintained (paper Eq. 4);
+- `detection` — the detector attribution `E_det` stored with its box (Eq. 2–3);
+- `temporal` — HAR temporal saliency `s_t` with aligned tracking reliability
+  `r_t` and identity uncertainty `u_t` (Eq. 7).
+
+### Producers
+
+Both evidence producers are real models, not placeholders:
+
+- **Detector attribution** — `ocsi.xai.DetectorGradCAM` runs Grad-CAM on the
+  detection head itself, so `E_det^y` is per detection rather than per frame. It
+  selects the anchor grid matching the box size, masks the backward gradient to
+  that box's anchor footprint (plus one cell of receptive field), and
+  un-letterboxes the map back to source resolution. `YOLODetector.explain(...)`
+  wraps it; it works with YOLOv8-style (`4 + nc`) and YOLOv5-style (`5 + nc`)
+  heads and re-enables gradients on inference checkpoints (Ultralytics loads
+  weights with `requires_grad=False`).
+- **Temporal saliency** — `frame_perturbation_saliency` replaces each frame of
+  the HAR window with the window mean and re-runs the recogniser, so `s_t` is the
+  measured drop in the chosen activity's probability. `har_score_fn(recognizer)`
+  adapts any `BehaviourRecognizer`. The distance heuristic is used only when
+  `model_forward=None`.
+
+`r_t` and `u_t` are **owned by the tracker**, not the perception layer: `r_t` is
+the per-match reliability and `u_t = 1 - gap` is the assignment ambiguity, where
+`gap` is the smaller row/column score margin over gate-admissible pairs (zero for
+a single candidate track). The tracker keeps a rolling window aligned to the HAR
+window length. `CECSCalculator.compute(allow_proxies=False)` is therefore the
+only call site; partial chains raise instead of silently substituting terms.
+
+### Cache + reporting
+
+Attribution is as expensive as detection, so it is cached with the detections in
+per-frame `<key>.xai.npz` sidecars (compressed, detection-indexed). Maps are
+downsampled to `cfg.xai.heatmap_size` (default 224×224) before storage and
+quantised to `uint8`; boxes and `img_shape` stay in source pixels, so
+energy-in-box and soft-IoU are unaffected. Rebuild the cache after enabling
+X-OCSI to populate them. Reading the live state:
+
+```python
+from ocsi.pipeline import track_sequence
+
+rows, tracker = track_sequence(detections_per_frame, cfg)
+for row in tracker.cecs_history:
+    print(row)                                  # frame, track_id, S_*, CECS
+rec = next(iter(tracker.bank.records.values()))
+print(rec.get_explanations("association")[-1].metadata)
+```
+
+`run_mot17_sequence` / `run_mot20_sequence` write a
+`<result>-cecs.json` sidecar and add a compact `cecs` block to the stage metrics
+when the `x-ocsi` stage is run. Attribution is requested automatically at
+cache-build time whenever any requested stage enables it, including the
+calibration pass of `run_mot17_dataset`. If a stage enables X-OCSI but no
+attribution reached the cache, the block still appears with `num_cecs: 0`, a
+`warning`, and the measured attribution coverage.
+
+Caveats: `MOT17`/`MOT20` carry no activity labels, so the temporal term is
+structural there (a recogniser runs, but its accuracy is unmeasured); the
+`public` detection source has no detector to attribute, so only `yolo` runs
+produce `E_det`; and `S_spatial` falls back to energy-in-box when only one
+attribution map exists. The earlier `scripts/cecs_mot_pilot.py` numbers remain a
+box-IoU proxy, not CECS — do not cite them.
 
 ## Ethics
 

@@ -58,6 +58,7 @@ behaviour:
 
 perception:
   detector_weights: "yolov8s.pt"
+  det_imgsz: 640                 # detector input size; also the Grad-CAM resolution
   person_class_id: 0
   det_conf_threshold: 0.15
   reid_backend: "auto"           # "auto" (torchreid/OSNet -> resnet50 -> resnet18),
@@ -69,3 +70,18 @@ perception:
   device: "auto"                 # "auto" -> cuda when available, else cpu
   use_pose: false                # off by default on CPU
   pose_weights: "yolov8n-pose.pt"
+
+xai:
+  enabled: false                 # X-OCSI: record explanation provenance and compute CECS
+  use_gradcam: true              # prefer Grad-CAM over activation-only attribution
+  cam_layer: null                # target layer name; resolved by the model adapter
+  store_heatmaps: false          # persist full heatmaps (memory-heavy); otherwise descriptors only
+  heatmap_size: [224, 224]       # normalised attribution size
+  w_s: 0.34                      # CECS spatial weight (paper Eq. 11)
+  w_t: 0.33                      # CECS temporal weight
+  w_i: 0.33                      # CECS identity weight
+  identity_uncertainty_weight: 1.0
+  reliability_weight: 1.0
+  temporal_epsilon: 1.0e-9
+  fidelity_steps: 50             # deletion/insertion steps for explanation-fidelity tests
+  perturbation_threshold: 0.5    # masking threshold used by perturbation saliency

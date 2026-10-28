@@ -1,0 +1,121 @@
+
+I reviewed the full 9-page manuscript, “X-OCSI: Identity-Persistent Cross-Stage Explainable Object-Centric Surveillance Intelligence for Detection, Tracking and Temporal Human Activity Recognition.” X-OCSI - Journal
+Q1 submission assessment
+Current submission readiness: 7.8/10.
+The manuscript has a strong Q1-level research concept and defensible novelty, but I would not submit the present version as the final empirical paper yet. The main issue is not writing quality or conceptual novelty. It is that the manuscript itself correctly acknowledges that the complete X-OCSI experimental validation remains outstanding. X-OCSI - Journal
+Dimension
+Rating
+Assessment
+Novelty
+9.0/10
+Strong and carefully bounded
+Research significance
+9.0/10
+High relevance to XAI, MOT, HAR and trustworthy surveillance
+Technical framework
+8.7/10
+Coherent mathematical architecture
+Literature positioning
+8.4/10
+Strong, but can be sharpened against nearest competing systems
+Methodological design
+8.8/10
+Excellent experimental plan
+Current empirical validation
+6.2/10
+Major weakness
+Explainability contribution
+9.1/10
+CECS is potentially the strongest contribution
+Reproducibility
+8.3/10
+Good structure, but implementation details/code needed
+Statistical rigor
+8.7/10
+Strong proposed protocol
+Discussion
+8.5/10
+Appropriately cautious
+References
+8.2/10
+Broad 60-reference base; several entries need verification/standardisation
+Q1 submission readiness
+7.8/10
+Major strengthening before submission
+1. The central novelty is strong
+The manuscript makes a sophisticated decision by not claiming object memory itself as novel. Instead, it positions novelty around persistent identity as the common reference through detection, association, memory, activity reasoning and explanation. That is much more defensible against reviewers. X-OCSI - Journal
+The five stated contributions are also logically connected rather than being a collection of unrelated modules: persistent object state, explainable multi-cue association, gated behavioural feedback, CECS, and a comprehensive evaluation protocol. X-OCSI - Journal
+I would retain this novelty framing almost exactly.
+2. CECS has the greatest publication potential
+The most interesting element is Cross-Stage Explanation Consistency (CECS):
+\[ CECS=w_sS_{spatial}+w_tS_{temporal}+w_iS_{identity} \]
+This moves the work beyond simply attaching Grad-CAM to a surveillance model. It asks whether the detector's evidence, temporal activity evidence and identity reliability remain consistent for the same person. X-OCSI - Journal
+The manuscript is also scientifically careful in saying that CECS is a consistency measure rather than a truth score. That distinction should remain prominent because reviewers will challenge any implication that explanation agreement establishes causal correctness.
+3. The major Q1 weakness is empirical completeness
+This is the decisive issue.
+Section V is explicitly titled “Preliminary Evidence and Required Main Results.” The current evidence shows promising improvements, such as MOT17-02 ID switches falling from 110 → 92 → 70, while MOT17-10 decreases from 249 → 216. Importantly, MOT20-03 gives a negative result: IDF1 falls from 0.513 to 0.504 despite a modest ID-switch reduction. X-OCSI - Journal
+Including the negative case is scientifically valuable. However, for a competitive empirical Q1 submission, preliminary sequence-level tracking results cannot validate the full paper's claims about XAI, HAR and CECS.
+The paper itself lists what is still required: full tracking, HAR, spatial fidelity, temporal fidelity, CECS validation, occlusion, generalisation, efficiency and failure-case experiments. X-OCSI - Journal
+This is the single largest barrier to submission.
+4. What must be completed before submission
+The priority should be the R1–R9 matrix already designed in the manuscript rather than adding more conceptual material.
+You need full B0/B1/B2/B3/B4/X-OCSI/Oracle-ID experiments, with HOTA, IDF1, AssA, DetA, IDsw and FPS for tracking; mAP/macro-F1 for HAR; deletion/insertion and perturbation tests for explanation fidelity; CECS discrimination experiments; occlusion-band analysis; cross-dataset testing; and latency/VRAM/XAI overhead. X-OCSI - Journal
+The Oracle-ID experiment is particularly important because it provides a clean experimental mechanism for separating HAR failure from upstream tracking/identity failure. The manuscript currently describes this correctly. X-OCSI - Journal
+5. CECS requires much stronger empirical validation
+A reviewer is likely to ask:
+Why should CECS be trusted as a useful explanation-quality indicator?
+H3–H6 already provide the basis for answering this question. X-OCSI - Journal
+The final results should demonstrate at least four things: CECS differs between correct and switched identities; CECS differs between correct and incorrect HAR predictions; CECS responds systematically to increasing occlusion; and confidence + CECS improves failure discrimination compared with confidence alone.
+That final comparison could become one of the paper's strongest results.
+6. The ablation design is excellent, but it needs results
+The baseline architecture is unusually well conceived:
+B0 → B1 → B2 → B3 → B4 → X-OCSI → Oracle-ID
+This allows reviewers to determine whether improvements originate from memory, behavioural feedback, explanation machinery, gating, or identity quality rather than from an opaque full-system comparison. X-OCSI - Journal
+Once populated with complete quantitative results and statistical significance/effect sizes, this could substantially increase the manuscript's strength.
+7. Strengthen the novelty comparison table
+The current “Defensible Novelty Boundary” is good but too compact. X-OCSI - Journal
+For submission, I recommend expanding it into a state-of-the-art comparative matrix containing representative methods across roughly these dimensions:
+Persistent ID | Object memory | Occlusion recovery | Behaviour feedback | Spatial XAI | Temporal XAI | Association explanation | Cross-stage explanation | Explanation fidelity | Identity-conditioned XAI
+The important result should emerge naturally from the comparison: existing work addresses subsets of these functions, whereas X-OCSI is designed to connect them through persistent identity. Avoid claiming “first-ever” unless an exhaustive search can substantiate it.
+8. The paper needs an architecture figure
+For a paper proposing an end-to-end framework, the absence of a strong central architecture figure materially weakens presentation.
+I recommend a landscape figure approximately structured as:
+Video → Detection → Identity Association → Object Memory Bank → Identity-conditioned HAR → XAI → CECS → Auditable Decision
+with feedback:
+Behaviour reasoning → confidence/time gate → association
+and explanation provenance flowing from detection, tracking/memory and HAR into CECS.
+That figure should visually communicate the paper before the equations are read.
+9. The mathematical formulation needs a little more precision
+Equations (4)–(6) are promising, but the final paper should explicitly define the ranges and normalization of each cost:
+\[ C_{app},C_{motion},C_{spatial},C_{memory},C_{behaviour} \]
+and explain how the \(\lambda\)'s are selected. X-OCSI - Journal
+Similarly, for CECS, specify whether \(w_s,w_t,w_i\) are equal, tuned on validation data, learned, or sensitivity-tested. The implementation table says the weights are fixed using validation data only, which is good, but the method should explain the actual optimisation/selection procedure. X-OCSI - Journal
+A CECS weight-sensitivity experiment would further strengthen the paper.
+10. Literature quality is good, but references need auditing
+The manuscript has 60 references, including recent 2025–2026 tracking, XAI and HAR literature. That is appropriate for this type of submission. X-OCSI - Journal
+Before submission, however, I recommend verifying every DOI, bibliographic detail, year, volume, article number and indexing status. Some foundational references are necessarily older, which is fine. But the immediate comparison set around identity-aware MOT + temporal XAI + explainable HAR + memory-based tracking should be dominated by the most recent high-quality work.
+Also reduce dependence on arXiv where a peer-reviewed version is available.
+11. The discussion is scientifically mature
+One of the manuscript's strongest features is that it does not overclaim the preliminary results. It explicitly recognises that fewer identity switches can coexist with lower IDF1 and discusses behavioural feedback as both an opportunity and a potential source of semantic error. X-OCSI - Journal
+That tone is suitable for a strong journal submission.
+The surveillance-governance paragraph is also valuable because it makes clear that explainability does not eliminate privacy, bias, retention and human-review requirements. X-OCSI - Journal
+Submission priority
+My recommended sequence is:
+Complete R1–R9 experiments.
+Validate CECS statistically.
+Run full B0–B4/X-OCSI/Oracle-ID ablations.
+Add the architecture/workflow figure.
+Add a comprehensive SOTA comparison matrix.
+Report confidence intervals, effect sizes and corrected significance tests.
+Add CECS weight/gating sensitivity analysis.
+Report computational complexity, FPS, latency, VRAM and XAI overhead.
+Verify all 60 references/DOIs and standardise IEEE formatting.
+Rewrite Abstract, Results, Discussion and Conclusion around the completed empirical evidence.
+The paper already specifies three seeds, 95% confidence intervals, effect sizes, normality testing, Wilcoxon alternatives, Holm correction and bootstrap ROC-AUC confidence intervals, which gives you an excellent statistical foundation. X-OCSI - Journal
+Final assessment
+Conceptual quality: 9.0/10
+Potential after full experiments: 9.2–9.5/10
+Current empirical completeness: 6.2/10
+Current submission readiness: 7.8/10
+The manuscript has moved beyond a generic “YOLO + DeepSORT + HAR + Grad-CAM” architecture. Its potentially publishable scientific contribution is the identity-persistent explanatory chain, particularly CECS and the explicit decomposition of how memory and gated behavioural evidence affect identity association. The current abstract captures that idea effectively. X-OCSI - Journal
+The strongest next move is not another general rewrite. It is to convert the excellent proposed experimental programme into actual results. Once R1–R9 are populated and CECS is empirically validated, the paper can then be rewritten around those findings into a substantially stronger Q1 submission.

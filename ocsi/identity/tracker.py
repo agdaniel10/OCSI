@@ -33,16 +33,17 @@ layer), so it is testable with synthetic detections and no models.
 """
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Dict, List
+from collections import defaultdict, deque
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..behaviour import behaviour_gate, blend_behaviour, contradiction_mask
 from ..config import OCSIConfig
+from ..explain import ExplanationRecorder
 from ..memory import MemoryRecord, ObjectMemoryBank
 from ..motion import KalmanFilter
-from ..types import Detection, TrackState, tlwh_to_xyah, tlwh_to_xyxy, xyah_to_tlwh
+from ..types import Detection, ExplanationInput, TrackState, tlwh_to_xyah, tlwh_to_xyxy, xyah_to_tlwh
 from .association import solve_assignment, two_stage_associate
 from .similarity import (
     cos_to_01,
@@ -63,11 +64,22 @@ class OCSITracker:
         self.kf = KalmanFilter()
         self.bank = ObjectMemoryBank(cfg.memory)
         self.frame_idx = -1
+        # X-OCSI: identity-persistent explanation provenance (enabled by cfg.xai)
+        self.explainer = ExplanationRecorder(cfg.xai) if cfg.xai.enabled else None
+        # Per-identity rolling (reliability, uncertainty) used to align the
+        # temporal term of CECS with a HAR window (paper Eq. 7). The tracker owns
+        # these values; the perception/HAR layers cannot know them.
+        self._identity_terms: Dict[int, deque] = {}
         # contamination-rollback bookkeeping: track_id -> consecutive conflict count
         self._conflict_counts: Dict[int, int] = defaultdict(int)
         # contamination statistics for diagnostics
         self.contamination_flags = 0
         self.rollbacks_applied = 0
+
+    @property
+    def cecs_history(self):
+        """Per-frame CECS rows for this run (empty when XAI is disabled)."""
+        return self.explainer.cecs_history if self.explainer is not None else []
 
     # ---------------------------------------------------------------- helpers
     def _ensure_kalman(self, rec: MemoryRecord) -> None:
@@ -218,6 +230,106 @@ class OCSITracker:
                 self.rollbacks_applied += 1
             self._conflict_counts[rec.track_id] = 0
 
+    def _record_explanations(
+        self,
+        rec: MemoryRecord,
+        det: Detection,
+        frame_idx: int,
+        cues: Dict[str, float],
+        weights: Dict[str, float],
+        score: float,
+        reliability: float,
+        margin: float = 0.0,
+        extra: Optional[Dict[str, float]] = None,
+        uncertainty: float = 0.0,
+    ) -> None:
+        """Append this match to the identity's explanation chain (X-OCSI).
+
+        Always stores the association rationale; stores detection/temporal events
+        and computes CECS only when the detection carries explanation evidence.
+        The tracker supplies the temporal window's ``r_t``/``u_t`` because the
+        perception layer cannot observe association reliability or identity
+        ambiguity.
+        """
+        if self.explainer is None:
+            return
+        self.explainer.record_association(
+            rec, frame_idx, cues, weights, score, reliability, margin, extra=extra
+        )
+        evidence = getattr(det, "explanation", None)
+        if not isinstance(evidence, ExplanationInput):
+            return
+        if evidence.saliency is not None and len(evidence.saliency) > 0:
+            window = int(len(evidence.saliency))
+            rel_arr, unc_arr = self._aligned_identity_terms(
+                rec.track_id, window, reliability, uncertainty
+            )
+            evidence = ExplanationInput(
+                det_heatmap=evidence.det_heatmap,
+                act_heatmap=evidence.act_heatmap,
+                saliency=evidence.saliency,
+                reliability=(
+                    rel_arr if evidence.reliability is None else evidence.reliability
+                ),
+                uncertainty=(
+                    unc_arr if evidence.uncertainty is None else evidence.uncertainty
+                ),
+                img_shape=evidence.img_shape,
+            )
+        self.explainer.record_evidence(rec, frame_idx, evidence, det.tlwh, score)
+
+    def _aligned_identity_terms(
+        self, track_id: int, length: int, reliability: float, uncertainty: float
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Rolling ``r_t``/``u_t`` aligned to a HAR window of ``length`` frames."""
+        window = self._identity_terms.get(track_id)
+        if window is None or window.maxlen != length:
+            window = deque(maxlen=length)
+            self._identity_terms[track_id] = window
+        window.append((float(reliability), float(uncertainty)))
+        values = list(window)
+        pad = length - len(values)
+        if pad > 0:
+            values = [values[0]] * pad + values
+        return (
+            np.asarray([v[0] for v in values], dtype=float),
+            np.asarray([v[1] for v in values], dtype=float),
+        )
+
+    @staticmethod
+    def _assignment_uncertainty(
+        score: np.ndarray, ti: int, di: int, valid: Optional[np.ndarray] = None
+    ) -> float:
+        """Identity uncertainty ``u_t`` from assignment ambiguity.
+
+        Zero when the identity is unambiguous (a single candidate track). With
+        competing tracks/detections it is ``1 - gap`` where ``gap`` is the smaller
+        of the row and column score margins: the closer the runner-up, the more
+        uncertain the identity attribution. Pairs rejected by the motion/class
+        gate are excluded, so a gated-out track cannot inflate confidence.
+        """
+        if score.ndim != 2 or score.shape[0] <= 1:
+            return 0.0
+
+        def gap(values: np.ndarray) -> Optional[float]:
+            values = np.asarray(values, dtype=float).reshape(-1)
+            if valid is not None:
+                values = values[np.isfinite(values)]
+            if values.size < 2:
+                return None
+            ordered = np.sort(values)[::-1]
+            return float(ordered[0] - ordered[1])
+
+        column = score[:, di]
+        row = score[ti]
+        if valid is not None:
+            column = np.where(valid[:, di], column, -np.inf)
+            row = np.where(valid[ti], row, -np.inf)
+        gaps = [g for g in (gap(column), gap(row)) if g is not None]
+        if not gaps:
+            return 0.0
+        return float(np.clip(1.0 - min(gaps), 0.0, 1.0))
+
     def _reactivate(self, tracks, detections, um_tracks, um_dets):
         """Appearance-only re-association of LOST tracks to leftover detections
         (occlusion recovery, paper §3.4).
@@ -285,6 +397,8 @@ class OCSITracker:
 
         T, D = len(tracks), len(detections)
         score = np.zeros((T, D))
+        bt = None
+        valid = None
         if T > 0 and D > 0:
             det_xyxy = np.stack([d.xyxy for d in detections])
             det_meas = np.stack([d.xyah for d in detections])
@@ -408,17 +522,58 @@ class OCSITracker:
                 self._conflict_counts[rec.track_id] = 0
             self.bank.update(rec.track_id, det, rel, f)
             self._maybe_update_behaviour(rec.track_id, det, rel)
+            # X-OCSI: auditable cue decomposition for this accepted match (Eq. 4).
+            # Weights are stored as the effective convex-combination weights, so
+            # sum(weights.values()) == 1 including the gated behaviour cue.
+            cue_scores = {
+                k: float(terms[k][ti, di])
+                for k in terms
+                if float(weights.get(k, 0.0)) > 0.0
+            }
+            base_weights = {k: float(weights[k]) for k in cue_scores}
+            wsum = sum(base_weights.values()) or 1.0
+            effective = {k: v / wsum for k, v in base_weights.items()}
+            extra: Dict[str, float] = {}
+            if bt is not None:
+                s_beh01, _cos_bt, g = bt
+                gate = float(g[ti, di])
+                wg = float(a.w_behaviour) * gate
+                denom = 1.0 + wg
+                effective = {k: v / denom for k, v in effective.items()}
+                effective["behaviour"] = wg / denom
+                cue_scores["behaviour"] = float(s_beh01[ti, di])
+                extra = {"behaviour_gate": gate, "behaviour_similarity": float(s_beh01[ti, di])}
+            self._record_explanations(
+                rec,
+                det,
+                f,
+                cue_scores,
+                effective,
+                float(score[ti, di]),
+                rel,
+                margin,
+                extra=extra,
+                uncertainty=self._assignment_uncertainty(score, ti, di, valid),
+            )
         for ti, di, appsc in reactivations:
             rec, det = tracks[ti], detections[di]
             rec.mean, rec.covariance = self.kf.initiate(det.xyah)   # reset stale post-occlusion Kalman
             rel = self._reliability(det, appsc)
             self.bank.update(rec.track_id, det, rel, f)
             self._maybe_update_behaviour(rec.track_id, det, rel)
+            # Reactivation is appearance-only by construction; record that rationale.
+            self._record_explanations(rec, det, f, {"app": float(appsc)}, {"app": 1.0}, float(appsc), rel)
         for ti in um_tracks:
             self.bank.mark_missed(tracks[ti].track_id)
         for di in um_dets:
             rec = self.bank.create(detections[di], f)
             rec.mean, rec.covariance = self.kf.initiate(detections[di].xyah)
+            # Detection-stage provenance exists from an identity's birth.
+            evidence = getattr(detections[di], "explanation", None)
+            if self.explainer is not None and isinstance(evidence, ExplanationInput):
+                self.explainer.record_evidence(
+                    rec, f, evidence, detections[di].tlwh, detections[di].confidence
+                )
 
         self.bank.step_end(f)                    # 6. retire
         return self.outputs()
@@ -434,6 +589,8 @@ class OCSITracker:
     def reset(self) -> None:
         self.bank = ObjectMemoryBank(self.cfg.memory)
         self.frame_idx = -1
+        self.explainer = ExplanationRecorder(self.cfg.xai) if self.cfg.xai.enabled else None
+        self._identity_terms.clear()
         self._conflict_counts.clear()
         self.contamination_flags = 0
         self.rollbacks_applied = 0

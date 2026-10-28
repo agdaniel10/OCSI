@@ -82,9 +82,21 @@ class ReIDEmbedder:
         except Exception:
             pass
 
-        # Final fallback: torchvision/resnet18
+        # Final fallback: torchvision/resnet18. If the pretrained weights cannot be
+        # fetched (offline kernels), degrade to random init with a loud warning
+        # rather than aborting a multi-hour cache build.
         from torchvision import models
-        backbone = models.resnet18(weights="DEFAULT" if self.cfg.reid_pretrained else None)
+
+        try:
+            backbone = models.resnet18(weights="DEFAULT" if self.cfg.reid_pretrained else None)
+        except Exception as exc:
+            warnings.warn(
+                f"pretrained Re-ID weights unavailable ({exc}); falling back to random "
+                "init. Identity metrics will be unsuitable for publication until real "
+                "weights load — attach them or enable internet.",
+                RuntimeWarning,
+            )
+            backbone = models.resnet18(weights=None)
         return self._torch.nn.Sequential(*list(backbone.children())[:-1]), "torchvision:resnet18"
 
     def _build_torchvision_model(self):

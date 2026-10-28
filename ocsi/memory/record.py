@@ -13,7 +13,7 @@ from typing import Deque, Optional, Tuple
 import numpy as np
 
 from ..config import MemoryConfig
-from ..types import Detection, TrackState, center
+from ..types import Detection, ExplanationEvent, TrackState, center
 
 
 def _l2_normalize(v: np.ndarray) -> np.ndarray:
@@ -59,6 +59,14 @@ class MemoryRecord:
         self._history: Deque[Tuple[Optional[np.ndarray], Optional[np.ndarray], float]] = deque(
             maxlen=cfg.rollback_history
         )
+
+        # X-OCSI: identity-persistent explanation history O_i^t[e_i^t]
+        self.explanation_history: Deque[ExplanationEvent] = deque(maxlen=64)
+        # Last known explanation artifacts for quick CECS access
+        self.last_detection_attribution = None  # ExplanationEvent | None
+        self.last_temporal_saliency = None       # ExplanationEvent | None
+        self.last_association_rationale = None   # ExplanationEvent | None
+        self.last_cecs = None                    # CECSResult | None
 
         self._init_from_detection(detection)
 
@@ -185,8 +193,24 @@ class MemoryRecord:
     def is_matchable(self) -> bool:
         return self.state in (TrackState.TENTATIVE, TrackState.CONFIRMED, TrackState.LOST)
 
+    # X-OCSI: explanation history helpers
+    def add_explanation(self, event: ExplanationEvent) -> None:
+        self.explanation_history.append(event)
+        if event.kind == "detection":
+            self.last_detection_attribution = event
+        elif event.kind == "temporal":
+            self.last_temporal_saliency = event
+        elif event.kind == "association":
+            self.last_association_rationale = event
+
+    def get_explanations(self, kind: Optional[str] = None):
+        if kind is None:
+            return list(self.explanation_history)
+        return [e for e in self.explanation_history if e.kind == kind]
+
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"MemoryRecord(id={self.track_id}, state={self.state.value}, hits={self.hits}, "
-            f"q={self.q:.3f}, tsu={self.time_since_update}, |G|={len(self.gallery)})"
+            f"q={self.q:.3f}, tsu={self.time_since_update}, |G|={len(self.gallery)}, "
+            f"|E|={len(self.explanation_history)})"
         )

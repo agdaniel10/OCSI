@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections import deque
 import json
 import os
+import warnings
 from dataclasses import asdict, dataclass
 from typing import Callable, Deque, Dict, List, Optional, Sequence
 
@@ -35,7 +36,8 @@ from ..eval.mot_io import read_gt, read_results, tracker_rows, write_results
 from ..identity.similarity import cosine_matrix, iou_matrix
 from ..identity import OCSITracker
 from ..memory import MemoryRecord
-from ..types import Detection
+from ..types import Detection, ExplanationInput
+from ..xai.temporal_saliency import frame_perturbation_saliency, har_score_fn
 
 
 @dataclass
@@ -111,6 +113,112 @@ def array_to_detections(array: np.ndarray, frame_idx: int) -> List[Detection]:
     return dets
 
 
+def explanation_cache_path(base_path: str) -> str:
+    """Sidecar path for per-detection explanation evidence."""
+    return os.path.splitext(base_path)[0] + ".xai.npz"
+
+
+_EXPLANATION_FIELDS = ("det_heatmap", "act_heatmap", "saliency", "reliability", "uncertainty")
+
+# 2-D attribution maps are quantised to uint8 before compression. A 224x224
+# float32 map is 200 KB per detection (~1.2 GB for a single MOT17 sequence);
+# uint8 plus ``savez_compressed`` brings that down by roughly an order of
+# magnitude without changing any CECS term (they are overlap/energy ratios).
+_HEATMAP_FIELDS = frozenset(("det_heatmap", "act_heatmap"))
+
+
+def _quantise_heatmap(value) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float32)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    peak = float(arr.max()) if arr.size else 0.0
+    if peak > 1.0:
+        arr = arr / peak
+    return np.round(np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def write_explanation_cache(path: str, detections: Sequence[Detection]) -> bool:
+    """Persist explanation evidence next to the detection cache.
+
+    Stored as a compressed ``.npz`` keyed by detection index so frames with no
+    attribution cost nothing and the (variable-length) temporal vectors stay
+    variable. Heatmaps are quantised to uint8 (see ``_HEATMAP_FIELDS``) because
+    the cache is per detection, not per frame. Returns ``True`` when at least one
+    detection carried evidence.
+    """
+    payload = {}
+    indices = []
+    for idx, det in enumerate(detections):
+        evidence = getattr(det, "explanation", None)
+        if not isinstance(evidence, ExplanationInput):
+            continue
+        indices.append(idx)
+        for name in _EXPLANATION_FIELDS:
+            value = getattr(evidence, name)
+            if value is None:
+                continue
+            arr = np.asarray(value, dtype=np.float32)
+            if name in _HEATMAP_FIELDS and arr.ndim == 2:
+                payload[f"{name}_{idx}"] = _quantise_heatmap(arr)
+            else:
+                payload[f"{name}_{idx}"] = arr
+        if evidence.img_shape is not None:
+            payload[f"img_shape_{idx}"] = np.asarray(evidence.img_shape, dtype=np.int32)
+    if not indices:
+        return False
+    payload["indices"] = np.asarray(indices, dtype=np.int32)
+    np.savez_compressed(path, **payload)
+    return True
+
+
+def read_explanation_cache(path: str, count: int) -> List[Optional[ExplanationInput]]:
+    """Load evidence written by :func:`write_explanation_cache`."""
+    out: List[Optional[ExplanationInput]] = [None] * int(count)
+    if not os.path.exists(path):
+        return out
+    with np.load(path, allow_pickle=False) as data:
+        for idx in np.asarray(data["indices"]).astype(int).tolist():
+            values = {}
+            for name in _EXPLANATION_FIELDS:
+                key = f"{name}_{idx}"
+                if key in data:
+                    arr = np.asarray(data[key])
+                    if arr.dtype == np.uint8:
+                        arr = arr.astype(np.float32) / 255.0
+                    values[name] = arr.astype(float)
+            shape_key = f"img_shape_{idx}"
+            if shape_key in data:
+                values["img_shape"] = tuple(int(v) for v in np.asarray(data[shape_key]).reshape(-1))
+            out[idx] = ExplanationInput(**values)
+    return out
+
+
+def attach_explanation_cache(path: str, detections: Sequence[Detection]) -> None:
+    """Attach cached evidence to already-deserialized detections (in place)."""
+    if not detections or not os.path.exists(path):
+        return
+    for det, evidence in zip(detections, read_explanation_cache(path, len(detections))):
+        if evidence is not None and det.explanation is None:
+            det.explanation = evidence
+
+
+def _clone_explanation(explanation: Optional[ExplanationInput]) -> Optional[ExplanationInput]:
+    """Deep-copy per-detection XAI evidence so stage-local runs cannot leak."""
+    if explanation is None:
+        return None
+
+    def _copy(value):
+        return None if value is None else np.asarray(value, dtype=float).copy()
+
+    return ExplanationInput(
+        det_heatmap=_copy(explanation.det_heatmap),
+        act_heatmap=_copy(explanation.act_heatmap),
+        saliency=_copy(explanation.saliency),
+        reliability=_copy(explanation.reliability),
+        uncertainty=_copy(explanation.uncertainty),
+        img_shape=explanation.img_shape,
+    )
+
+
 def _clone_detection(det: Detection) -> Detection:
     """Copy a cached detection so stage-local behaviour annotations cannot leak."""
     return Detection(
@@ -123,6 +231,7 @@ def _clone_detection(det: Detection) -> Detection:
         behaviour_embedding=None,
         activity_probs=None,
         context=None if det.context is None else np.asarray(det.context, dtype=float).copy(),
+        explanation=_clone_explanation(det.explanation),
     )
 
 
@@ -192,10 +301,21 @@ def _attach_embeddings_to_frames(
                 raise FileNotFoundError(path)
             dets = list(detections_for_frame(frame_idx, frame_bgr))
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            return detections_to_array(embedder.attach_embeddings(frame_rgb, dets))
+            enriched = embedder.attach_embeddings(frame_rgb, dets)
+            # X-OCSI: attribution is expensive, so it is cached alongside the
+            # embeddings and reused across ablation stages and seeds.
+            if cfg.xai.enabled:
+                sidecar = cache.path(key, ".xai.npz")
+                if sidecar:
+                    write_explanation_cache(sidecar, enriched)
+            return detections_to_array(enriched)
 
         arr = cache.get_or_compute(key, compute)
-        detections_per_frame.append(array_to_detections(arr, frame_idx))
+        frame_dets = array_to_detections(arr, frame_idx)
+        sidecar = cache.path(key, ".xai.npz")
+        if sidecar:
+            attach_explanation_cache(sidecar, frame_dets)
+        detections_per_frame.append(frame_dets)
     return detections_per_frame
 
 
@@ -215,7 +335,13 @@ def build_perception_cache(
     detector = YOLODetector(cfg.perception)
 
     def detections_for_frame(frame_idx: int, frame_bgr: np.ndarray) -> Sequence[Detection]:
-        return detector(frame_bgr, frame_idx=frame_idx)
+        dets = detector(frame_bgr, frame_idx=frame_idx)
+        if cfg.xai.enabled:
+            # Detector attribution E_det per detection (paper Eq. 2-3).
+            # ``heatmap_size`` keeps the cached evidence small; boxes and
+            # ``img_shape`` stay in source pixels.
+            dets = detector.explain(frame_bgr, dets, heatmap_size=cfg.xai.heatmap_size)
+        return dets
 
     return _attach_embeddings_to_frames(seq_dir, cache_dir, detections_for_frame, cfg, "yolo", limit)
 
@@ -258,7 +384,11 @@ def load_cached_detections(
         arr = cache.get(key)
         if arr is None:
             raise FileNotFoundError(f"missing cached detections for {key!r} in {cache_dir!r}")
-        out.append(array_to_detections(arr, frame_idx))
+        frame_dets = array_to_detections(arr, frame_idx)
+        sidecar = cache.path(key, ".xai.npz")
+        if sidecar:
+            attach_explanation_cache(sidecar, frame_dets)
+        out.append(frame_dets)
     return out
 
 
@@ -379,8 +509,26 @@ def _attach_behaviour_observations(
         observation = recognizer.observe(windows[track.track_id])
         if observation is None:
             continue
-        detections[det_idx].activity_probs = observation.probs
-        detections[det_idx].behaviour_embedding = observation.embedding
+        det = detections[det_idx]
+        det.activity_probs = observation.probs
+        det.behaviour_embedding = observation.embedding
+        # X-OCSI: genuine temporal saliency for the same window that produced the
+        # activity observation. Each frame is replaced by the window mean and the
+        # HAR model is re-run; the drop in the chosen class probability is the
+        # frame's contribution (paper Eq. 7). Costs L extra HAR forwards per
+        # track-frame, only when explainability is enabled.
+        if tracker.explainer is not None:
+            saliency = frame_perturbation_saliency(
+                har_score_fn(recognizer, class_index=int(np.argmax(observation.probs))),
+                list(windows[track.track_id]),
+            )
+            if saliency.size:
+                prior = det.explanation
+                det.explanation = (
+                    ExplanationInput(saliency=saliency)
+                    if prior is None
+                    else prior.merged(saliency=saliency)
+                )
 
     for det in detections:
         if det.activity_probs is not None and det.behaviour_embedding is not None:
@@ -448,6 +596,15 @@ def track_cached_sequence(
         _update_behaviour_windows(updated_tracks, frame_detections, behaviour_windows, max_window)
         rows.extend(tracker_rows(frame_idx, updated_tracks))
     write_results(output_path, rows)
+
+    # X-OCSI: persist the identity explanation chain / CECS next to the MOT file.
+    if tracker.explainer is not None:
+        cecs_payload = tracker.explainer.summary()
+        cecs_payload["frames"] = len(detections_per_frame)
+        cecs_payload["history"] = tracker.explainer.cecs_history
+        cecs_path = os.path.splitext(output_path)[0] + "-cecs.json"
+        with open(cecs_path, "w", encoding="utf-8") as fh:
+            json.dump(cecs_payload, fh, indent=2)
 
     # Attach efficiency statistics to the tracker for the caller to read
     tracker.efficiency = {
@@ -591,6 +748,21 @@ def recommended_reactivation_gate(
     return float(np.clip(gate, 0.0, 1.0))
 
 
+def _cache_cfg_for_stages(cfg: OCSIConfig, stages: Sequence[str]) -> OCSIConfig:
+    """Config to build the perception cache with.
+
+    Attribution is produced while building the cache, so it must be requested
+    whenever *any* stage in the run enables X-OCSI. The per-stage config does not
+    exist yet at cache-build time, and a cache built without attribution cannot
+    be upgraded at load time without silently yielding an empty CECS table.
+    """
+    if not cfg.xai.enabled and any(apply_ablation(cfg, s).xai.enabled for s in stages):
+        cache_cfg = OCSIConfig.from_dict(cfg.to_dict())
+        cache_cfg.xai.enabled = True
+        return cache_cfg
+    return cfg
+
+
 def run_mot17_sequence(
     seq_dir: str,
     cache_dir: str,
@@ -615,19 +787,50 @@ def run_mot17_sequence(
     if detection_source not in ("yolo", "public"):
         raise ValueError("detection_source must be 'yolo' or 'public'")
 
+    # Attribution is produced while building the cache, so it must be requested
+    # whenever any stage in this run enables X-OCSI.
+    cache_cfg = _cache_cfg_for_stages(base_cfg, stages)
+
     if rebuild_cache or not os.path.exists(cache_dir):
         if detection_source == "public":
             detections = build_public_detection_cache(
                 seq_dir, cache_dir, base_cfg, limit, base_cfg.perception.det_conf_threshold
             )
         else:
-            detections = build_perception_cache(seq_dir, cache_dir, base_cfg, limit)
+            detections = build_perception_cache(seq_dir, cache_dir, cache_cfg, limit)
     else:
-        detections = load_cached_detections(
-            seq_dir, cache_dir, limit, detection_source, base_cfg.perception.det_conf_threshold
-        )
+        try:
+            detections = load_cached_detections(
+                seq_dir, cache_dir, limit, detection_source, base_cfg.perception.det_conf_threshold
+            )
+        except FileNotFoundError:
+            # A limited (`--limit`) or interrupted run leaves a partial cache. Fill
+            # the missing frames instead of failing the whole sequence; frames that
+            # are already present are reused.
+            warnings.warn(
+                f"incomplete perception cache at {cache_dir!r}; building missing frames",
+                RuntimeWarning,
+            )
+            if detection_source == "public":
+                detections = build_public_detection_cache(
+                    seq_dir, cache_dir, base_cfg, limit, base_cfg.perception.det_conf_threshold
+                )
+            else:
+                detections = build_perception_cache(seq_dir, cache_dir, cache_cfg, limit)
 
     gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
+    num_detections = sum(len(frame) for frame in detections)
+    num_attributed = sum(
+        1
+        for frame in detections
+        for det in frame
+        if det.explanation is not None and det.explanation.det_heatmap is not None
+    )
+    attribution = {
+        "detections": int(num_detections),
+        "detections_with_det_heatmap": int(num_attributed),
+        "coverage": (float(num_attributed) / num_detections) if num_detections else 0.0,
+    }
     diagnostics = embedding_diagnostics(detections, gt)
     recommended_gate = recommended_reactivation_gate(
         diagnostics,
@@ -657,6 +860,32 @@ def run_mot17_sequence(
         metric_payload = metrics.as_dict()
         metric_payload["reactivation_app_gate"] = stage_cfg.association.reactivation_app_gate
         metric_payload["adaptive_reactivation"] = stage_cfg.association.adaptive_reactivation
+        if stage_cfg.xai.enabled:
+            cecs_path = os.path.splitext(result_path)[0] + "-cecs.json"
+            if os.path.exists(cecs_path):
+                with open(cecs_path, "r", encoding="utf-8") as fh:
+                    cecs_payload = json.load(fh)
+                cecs_payload.pop("history", None)   # full trace stays in the sidecar
+            else:
+                cecs_payload = {
+                    "enabled": True,
+                    "num_cecs": 0,
+                    "warning": "tracker produced no CECS sidecar",
+                }
+            cecs_payload["attribution"] = dict(attribution)
+            if cecs_payload.get("num_cecs", 0) == 0:
+                reason = (
+                    "no detector attribution in the cache: rebuild with "
+                    "detection_source='yolo' and xai enabled"
+                    if attribution["coverage"] == 0.0
+                    else "no identity accumulated a complete evidence chain"
+                )
+                cecs_payload.setdefault("warning", reason)
+                warnings.warn(
+                    f"{seq_name} [{stage}]: CECS unavailable ({reason})",
+                    RuntimeWarning,
+                )
+            metric_payload["cecs"] = cecs_payload
         results.append(
             MOT17StageResult(
                 stage=stage,
@@ -674,6 +903,7 @@ def run_mot17_sequence(
         "seed": seed,
         "reactivation_app_gate": fixed_gate,
         "recommended_reactivation_app_gate": recommended_gate,
+        "attribution": attribution,
         "embedding_diagnostics": diagnostics,
         "results": [asdict(r) for r in results],
         "note": (
@@ -736,6 +966,11 @@ def run_mot17_dataset(
     # If both sets are provided, calibrate the gate on calibration sequences only
     calibrated_gate: Optional[float] = None
     if calib_set and eval_set:
+        base_cfg = cfg or OCSIConfig()
+        # Calibration builds the same cache the main loop will load, so it has to
+        # request attribution for the same reasons (otherwise an x-ocsi run would
+        # find a cache with no ``.xai.npz`` sidecars and report no CECS).
+        cache_cfg = _cache_cfg_for_stages(base_cfg, stages)
         # Run calibration sequences first to compute the recommended gate
         calib_gates = []
         for seq_dir in seq_dirs:
@@ -747,23 +982,23 @@ def run_mot17_dataset(
             if rebuild_cache or not os.path.exists(seq_cache):
                 if detection_source == "public":
                     detections = build_public_detection_cache(
-                        seq_dir, seq_cache, cfg or OCSIConfig(), limit,
-                        (cfg or OCSIConfig()).perception.det_conf_threshold,
+                        seq_dir, seq_cache, base_cfg, limit,
+                        base_cfg.perception.det_conf_threshold,
                     )
                 else:
-                    detections = build_perception_cache(seq_dir, seq_cache, cfg or OCSIConfig(), limit)
+                    detections = build_perception_cache(seq_dir, seq_cache, cache_cfg, limit)
             else:
                 detections = load_cached_detections(
                     seq_dir, seq_cache, limit, detection_source,
-                    (cfg or OCSIConfig()).perception.det_conf_threshold,
+                    base_cfg.perception.det_conf_threshold,
                 )
             gt = read_gt(os.path.join(seq_dir, "gt", "gt.txt"))
             diag = embedding_diagnostics(detections, gt)
             gate = recommended_reactivation_gate(
                 diag,
-                (cfg or OCSIConfig()).association.reactivation_app_gate,
-                diff_margin=(cfg or OCSIConfig()).association.adaptive_diff_margin,
-                same_margin=(cfg or OCSIConfig()).association.adaptive_same_margin,
+                base_cfg.association.reactivation_app_gate,
+                diff_margin=base_cfg.association.adaptive_diff_margin,
+                same_margin=base_cfg.association.adaptive_same_margin,
             )
             calib_gates.append(gate)
         if calib_gates:

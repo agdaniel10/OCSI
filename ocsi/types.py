@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -54,6 +54,47 @@ def center(tlwh: np.ndarray) -> np.ndarray:
 
 
 @dataclass
+class ExplanationInput:
+    """Cross-stage explanation evidence attached to a detection (X-OCSI §III).
+
+    Produced by the XAI layer (detector attribution, activity attribution) and
+    the HAR layer (temporal saliency), then consumed by the tracker to build the
+    identity's explanation history and compute CECS. All arrays are optional so a
+    partially instrumented pipeline can still run; CECS is only computed once a
+    complete evidence set is available.
+    """
+
+    det_heatmap: Optional[np.ndarray] = None       # E_det, detector attribution (H, W)
+    act_heatmap: Optional[np.ndarray] = None       # E_act, HAR attribution (H, W)
+    saliency: Optional[np.ndarray] = None          # s_t, (L,) over the HAR window
+    reliability: Optional[np.ndarray] = None       # r_t, (L,) tracking reliability per frame
+    uncertainty: Optional[np.ndarray] = None       # u_t, (L,) identity uncertainty per frame
+    img_shape: Optional[Tuple[int, int]] = None    # (H, W) of the source frame
+
+    def __post_init__(self) -> None:
+        for name in ("det_heatmap", "act_heatmap", "saliency", "reliability", "uncertainty"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, np.asarray(value, dtype=float))
+
+    def merged(self, **overrides) -> "ExplanationInput":
+        """Copy with selected fields replaced (producers run at different stages)."""
+        values = {
+            name: getattr(self, name)
+            for name in (
+                "det_heatmap",
+                "act_heatmap",
+                "saliency",
+                "reliability",
+                "uncertainty",
+                "img_shape",
+            )
+        }
+        values.update(overrides)
+        return ExplanationInput(**values)
+
+
+@dataclass
 class Detection:
     """A single frame-level person detection."""
 
@@ -69,6 +110,8 @@ class Detection:
     activity_probs: Optional[np.ndarray] = None       # (num_classes,) activity class probs
     # --- context cue (paper §3.3 Q_c), attached by the perception layer ---
     context: Optional[np.ndarray] = None              # (d_c,) interaction/context embedding
+    # --- X-OCSI cross-stage explanation evidence (paper §3.1-3.6) ---
+    explanation: Optional[ExplanationInput] = None
 
     def __post_init__(self) -> None:
         self.tlwh = np.asarray(self.tlwh, dtype=float)
@@ -96,3 +139,26 @@ class Detection:
     @property
     def area(self) -> float:
         return float(self.tlwh[2] * self.tlwh[3])
+
+
+@dataclass
+class ExplanationEvent:
+    """A single explanation event stored in an identity's explanation history.
+
+    Used by X-OCSI to build the cross-stage explanation chain (detection
+    attribution, temporal saliency, association rationale) over time.
+    """
+
+    frame_idx: int
+    kind: str = "detection"  # "detection" | "temporal" | "association"
+    bbox: Optional[np.ndarray] = None
+    heatmap: Optional[np.ndarray] = None
+    score: float = 0.0
+    target: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.bbox is not None:
+            self.bbox = np.asarray(self.bbox, dtype=float)
+        if self.heatmap is not None:
+            self.heatmap = np.asarray(self.heatmap, dtype=float)
