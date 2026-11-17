@@ -140,6 +140,24 @@ Practical notes:
 MOT17 still has no activity labels, so the temporal term is structurally wired
 but unvalidated there; report it as such.
 
+## UCF-Crime testing on Kaggle
+
+UCF-Crime has video-level anomaly labels (and frame intervals for the test split),
+but **no person boxes or person IDs**. It therefore tests the cognitive/anomaly
+layer only — not IDF1/IDsw or per-person behaviour feedback (use MOT17/MOT20 for
+those). A complete guide is in [`KAGGLE_UCF_CRIME.md`](KAGGLE_UCF_CRIME.md), and
+[`kaggle_ucf_crime.ipynb`](kaggle_ucf_crime.ipynb) is a ready-to-run notebook.
+
+```python
+# clone/pull, attach a UCF-Crime dataset, enable GPU, then:
+!cd /kaggle/working/OCSI && python kaggle_ucf_crime.py --smoke
+!cd /kaggle/working/OCSI && python kaggle_ucf_crime.py --limit-videos 12 --frames 300 --stride 5 --stages baseline,memory,feedback
+```
+
+The runner caches YOLO + Re-ID detections, logs per-frame OCSI signals
+(`new_ids`, `n_lost`, `mean_q`, `mean_gate`), and writes frame/video anomaly AUCs
+plus CSV/JSON/PNG outputs under `/kaggle/working/ocsi_ucf_outputs/`.
+
 ## Layout
 
 ```

@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Kaggle / local experiment outputs
+ocsi_outputs/
+ocsi_ucf_outputs/
+ocsi_ucf_cache/
+*.npz
+*.pt
