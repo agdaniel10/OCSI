@@ -149,14 +149,18 @@ those). A complete guide is in [`KAGGLE_UCF_CRIME.md`](KAGGLE_UCF_CRIME.md), and
 [`kaggle_ucf_crime.ipynb`](kaggle_ucf_crime.ipynb) is a ready-to-run notebook.
 
 ```python
-# clone/pull, attach a UCF-Crime dataset, enable GPU, then:
-!cd /kaggle/working/OCSI && python kaggle_ucf_crime.py --smoke
-!cd /kaggle/working/OCSI && python kaggle_ucf_crime.py --limit-videos 12 --frames 300 --stride 5 --stages baseline,memory,feedback
+# clone/pull, attach a UCF-Crime dataset, enable GPU T4 x2, then:
+# ALL ~1,900 videos (omit --limit-videos / --smoke). ~4-6 h at 320px, ~6-10 h at 640px.
+!cd /kaggle/working/OCSI && python kaggle_ucf_crime.py \
+    --frames 300 --stride 5 --imgsz 320 --batch-size 32 \
+    --stages baseline,memory,feedback --resume
 ```
 
-The runner caches YOLO + Re-ID detections, logs per-frame OCSI signals
-(`new_ids`, `n_lost`, `mean_q`, `mean_gate`), and writes frame/video anomaly AUCs
-plus CSV/JSON/PNG outputs under `/kaggle/working/ocsi_ucf_outputs/`.
+The runner batches YOLO + Re-ID inference, caches detections, and appends a
+checkpoint per video/stage so an interrupted run can continue with `--resume`.
+It logs per-frame OCSI signals (`new_ids`, `n_lost`, `mean_q`, `mean_gate`) and
+writes frame/video anomaly AUCs plus CSV/JSON/PNG outputs under
+`/kaggle/working/ocsi_ucf_outputs/`.
 
 ## Layout
 

@@ -57,6 +57,12 @@ CLASS_ALIASES = {
     "accident": "RoadAccidents", "fighting": "Fighting", "normal": "Normal",
 }
 VIDEO_SUFFIXES = (".mp4", ".avi", ".mkv", ".mov")
+FRAME_FIELDS = [
+    "video", "class", "stage", "original_frame", "anomaly_score",
+    "frame", "n_detections", "n_active", "n_lost", "new_ids",
+    "mean_q", "min_q", "mean_gate", "gate_fraction",
+    "contamination_flags", "rollbacks",
+]
 
 
 # ------------------------------------------------------------------ discovery
@@ -205,17 +211,73 @@ def cache_path(cache_dir: Path, video: Path, n_frames: int, stride: int,
     return cache_dir / f"{video.stem}_{digest}.npz"
 
 
-def build_detections(frames: Sequence[np.ndarray], cfg: OCSIConfig) -> Tuple[List[List[Detection]], int]:
+def build_detections(
+    frames: Sequence[np.ndarray], cfg: OCSIConfig, batch_size: int = 16
+) -> Tuple[List[List[Detection]], int]:
+    """Run YOLO + Re-ID in batches (much faster than one predict call per frame).
+
+    Detection results are identical to the single-frame path; only inference
+    scheduling changes. This matters for a full 1,900-video UCF-Crime pass, where
+    per-call Ultralytics overhead otherwise dominates runtime.
+    """
     from ocsi.perception import ReIDEmbedder, YOLODetector
+    from ocsi.perception.detector import filter_detections
 
     detector = YOLODetector(cfg.perception)
     embedder = ReIDEmbedder(cfg.perception)
     dim = int(embedder.dim)
-    per_frame: List[List[Detection]] = []
-    for idx, frame in enumerate(frames):
-        dets = detector(frame, frame_idx=idx)
-        dets = embedder.attach_embeddings(cv2_cvt_rgb(frame), dets)
-        per_frame.append(dets)
+    bs = max(1, int(batch_size))
+    per_frame: List[List[Detection]] = [[] for _ in frames]
+    reid_bs = max(1, int(cfg.perception.reid_batch_size))
+    torch = embedder._torch
+
+    for start in range(0, len(frames), bs):
+        batch = list(frames[start:start + bs])
+        results = detector.model.predict(
+            batch,
+            classes=[cfg.perception.person_class_id],
+            conf=cfg.perception.det_conf_threshold,
+            imgsz=int(cfg.perception.det_imgsz),
+            device=detector.device,
+            verbose=False,
+        )
+        if not isinstance(results, (list, tuple)):
+            results = [results]
+
+        crops: List[np.ndarray] = []
+        owners: List[Tuple[int, Detection]] = []
+        for local_idx, result in enumerate(results[:len(batch)]):
+            boxes = result.boxes
+            if boxes is None or len(boxes) == 0:
+                continue
+            xyxy = boxes.xyxy.cpu().numpy()
+            tlwh = np.column_stack([
+                xyxy[:, 0], xyxy[:, 1], xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]
+            ])
+            dets = filter_detections(
+                tlwh,
+                boxes.conf.cpu().numpy(),
+                boxes.cls.cpu().numpy(),
+                cfg.perception.person_class_id,
+                cfg.perception.det_conf_threshold,
+                start + local_idx,
+            )
+            frame_rgb = cv2_cvt_rgb(batch[local_idx])
+            for det in dets:
+                crops.append(embedder._crop_chw(frame_rgb, det.tlwh))
+                owners.append((local_idx, det))
+
+        if crops:
+            feats: List[np.ndarray] = []
+            for i in range(0, len(crops), reid_bs):
+                tensor = torch.from_numpy(np.stack(crops[i:i + reid_bs])).to(embedder.device)
+                feats.append(embedder._forward_features(tensor).cpu().numpy())
+            feats_arr = np.concatenate(feats).astype(np.float32)
+            norms = np.linalg.norm(feats_arr, axis=1, keepdims=True)
+            feats_arr = feats_arr / np.clip(norms, 1e-12, None)
+            for (local_idx, det), feat in zip(owners, feats_arr):
+                det.embedding = feat
+                per_frame[start + local_idx].append(det)
     return per_frame, dim
 
 
@@ -449,8 +511,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--det-conf", type=float, default=0.15)
     parser.add_argument("--reid-backend", default="auto", help="auto / torchvision / torchreid")
+    parser.add_argument("--batch-size", type=int, default=16, help="frames per YOLO/Re-ID inference batch")
     parser.add_argument("--smoke", action="store_true", help="2 videos, 60 frames, baseline+memory")
     parser.add_argument("--refresh-cache", action="store_true", help="rebuild detection cache")
+    parser.add_argument("--resume", action="store_true", help="skip video/stage pairs already in progress file")
     parser.add_argument("--no-plots", action="store_true")
     args = parser.parse_args(argv)
 
@@ -477,21 +541,55 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg.perception.det_imgsz = int(args.imgsz)
     cfg.perception.det_conf_threshold = float(args.det_conf)
     cfg.perception.reid_backend = args.reid_backend
+    run_signature = hashlib.md5(
+        json.dumps(
+            {
+                "frames": args.frames, "stride": args.stride, "imgsz": args.imgsz,
+                "det_conf": args.det_conf, "reid": args.reid_backend,
+                "device": cfg.perception.device, "seed": args.seed, "stages": stages,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
 
     print(f"data dir : {root}")
     print(f"videos   : {len(videos)} (found {len(all_videos)})")
     print(f"stages   : {', '.join(stages)}")
-    print(f"frames   : {args.frames} per video, stride {args.stride}")
+    print(f"frames   : {args.frames} per video, stride {args.stride}, batch {args.batch_size}")
     print(f"device   : {cfg.perception.device}   Re-ID: {cfg.perception.reid_backend}")
+    print(f"resume   : {args.resume}   signature: {run_signature}")
     print(f"outputs  : {out_dir}")
 
-    rows: List[Dict[str, Any]] = []          # one row per video/stage (for plots)
-    frame_records: List[Dict[str, Any]] = [] # one row per sampled frame (CSV)
-    summary_rows: List[Dict[str, Any]] = []
+    progress_path = out_dir / "ucf_crime_progress.jsonl"
+    frame_csv = out_dir / "ucf_crime_frame_scores.csv"
+    completed: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    if args.resume and progress_path.exists():
+        for line in progress_path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+                if record.get("run_signature") != run_signature:
+                    continue  # stale checkpoint from different settings
+                completed[(record["video"], record["stage"])] = record
+            except (ValueError, KeyError):
+                continue
+        print(f"resuming: {len(completed)} completed video/stage records")
+    else:
+        progress_path.write_text("", encoding="utf-8")
+        if frame_csv.exists():
+            frame_csv.unlink()
+    if not frame_csv.exists():
+        with frame_csv.open("w", newline="", encoding="utf-8") as fh:
+            csv.DictWriter(fh, fieldnames=FRAME_FIELDS).writeheader()
+
+    rows: List[Dict[str, Any]] = list(completed.values())  # one row per video/stage
     started = time.time()
 
     for position, video in enumerate(videos, 1):
         cls = infer_class(video)
+        pending = [s for s in stages if (video.stem, s) not in completed]
+        if not pending:
+            print(f"\n[{position}/{len(videos)}] {video.name}  ({cls}) — already complete (resume)")
+            continue
         print(f"\n[{position}/{len(videos)}] {video.name}  ({cls})")
         cache = cache_path(
             cache_dir, video, args.frames, args.stride, args.imgsz,
@@ -502,13 +600,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("  cache hit")
         else:
             frames, originals, fps = sample_frames(video, args.frames, args.stride)
-            detections, dim = build_detections(frames, cfg)
+            detections, dim = build_detections(frames, cfg, args.batch_size)
             save_cache(cache, detections, originals, fps, dim)
             print(f"  cached {sum(len(f) for f in detections)} detections over {len(originals)} frames")
         intervals = annotations.get(video.stem, [])
         labels = frame_labels(originals, intervals) if cls != "Normal" else np.zeros(len(originals))
 
-        for stage in stages:
+        for stage in pending:
             signals, totals = run_stage(detections, stage, cfg, args.seed)
             scores = anomaly_scores(signals)
             frame_auc = auc_score(labels, scores) if cls != "Normal" and intervals else None
@@ -527,33 +625,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "scores_json": json.dumps([float(v) for v in scores]),
                 **last_signals,
             }
+            row["class"] = cls
+            row["run_signature"] = run_signature
             rows.append(row)
-            for frame_idx, (signal, score) in enumerate(zip(signals, scores)):
-                record: Dict[str, Any] = {
-                    "video": video.stem,
-                    "class": cls,
-                    "stage": stage,
-                    "original_frame": (
-                        int(originals[frame_idx]) if frame_idx < len(originals) else frame_idx + 1
-                    ),
-                    "anomaly_score": float(score),
-                }
-                record.update({k: float(v) for k, v in signal.items()})
-                frame_records.append(record)
-            summary_rows.append(
-                {
-                    "video": video.stem,
-                    "class": cls,
-                    "stage": stage,
-                    "frame_auc": "" if frame_auc is None else f"{frame_auc:.4f}",
-                    "video_score": f"{video_score:.4f}",
-                    "created_ids": int(totals["created_ids"]),
-                    "contamination_flags": int(totals["contamination_flags"]),
-                    "rollbacks": int(totals["rollbacks"]),
-                }
-            )
+            completed[(video.stem, stage)] = row
+            with progress_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+            with frame_csv.open("a", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=FRAME_FIELDS)
+                for frame_idx, (signal, score) in enumerate(zip(signals, scores)):
+                    record: Dict[str, Any] = {
+                        "video": video.stem,
+                        "class": cls,
+                        "stage": stage,
+                        "original_frame": (
+                            int(originals[frame_idx]) if frame_idx < len(originals) else frame_idx + 1
+                        ),
+                        "anomaly_score": float(score),
+                    }
+                    record.update({k: float(v) for k, v in signal.items()})
+                    writer.writerow(
+                        {
+                            key: (
+                                f"{record[key]:.6f}"
+                                if isinstance(record.get(key), float)
+                                else record.get(key, "")
+                            )
+                            for key in FRAME_FIELDS
+                        }
+                    )
             tag = "" if frame_auc is None else f"  frame AUC={frame_auc:.3f}"
             print(f"    {stage:14s} score={video_score:.3f}  IDs={int(totals['created_ids']):3d}{tag}")
+
+    # Rebuild the tidy summary from all completed records (works with --resume).
+    summary_rows = [
+        {
+            "video": r["video"],
+            "class": r.get("class", r.get("cls", "Unknown")),
+            "stage": r["stage"],
+            "frame_auc": "" if r.get("frame_auc") is None else f"{float(r['frame_auc']):.4f}",
+            "video_score": f"{float(r['video_score']):.4f}",
+            "created_ids": int(r.get("created_ids", 0)),
+            "contamination_flags": int(r.get("contamination_flags", 0)),
+            "rollbacks": int(r.get("rollbacks", 0)),
+        }
+        for r in rows
+    ]
 
     # Video-level normal vs abnormal AUC from the per-video anomaly score.
     video_aucs: Dict[str, Optional[float]] = {}
@@ -571,10 +688,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "videos": [str(v) for v in videos],
         "classes": [infer_class(v) for v in videos],
         "annotations_file": str(annotation_path) if annotation_path else "",
+        "progress_file": str(progress_path),
         "stages": stages,
         "config": {
             "frames": args.frames, "stride": args.stride, "imgsz": args.imgsz,
             "det_conf": args.det_conf, "reid_backend": args.reid_backend,
+            "batch_size": args.batch_size, "resume": args.resume,
+            "run_signature": run_signature,
             "device": cfg.perception.device, "seed": args.seed,
         },
         "backend_name": cfg.perception.reid_backend,
@@ -589,24 +709,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     }
     with (out_dir / "ucf_crime_results.json").open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
-    with (out_dir / "ucf_crime_summary.csv").open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(summary_rows[0]))
-        writer.writeheader()
-        writer.writerows(summary_rows)
-    frame_csv = out_dir / "ucf_crime_frame_scores.csv"
-    base_cols = ["video", "class", "stage", "original_frame", "anomaly_score"]
-    extra_cols = [k for k in frame_records[0] if k not in base_cols] if frame_records else []
-    fieldnames = base_cols + extra_cols
-    with frame_csv.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for record in frame_records:
-            writer.writerow(
-                {
-                    key: (f"{record[key]:.6f}" if isinstance(record.get(key), float) else record.get(key, ""))
-                    for key in fieldnames
-                }
-            )
+    if summary_rows:
+        with (out_dir / "ucf_crime_summary.csv").open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(summary_rows[0]))
+            writer.writeheader()
+            writer.writerows(summary_rows)
 
     if not args.no_plots:
         save_plots(rows, annotations, out_dir)
@@ -615,8 +722,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for stage, value in video_aucs.items():
         print(f"  {stage:14s} {'-' if value is None else f'{value:.3f}'}")
     print(f"\nelapsed: {elapsed / 60.0:.1f} min")
-    print(f"results: {out_dir / 'ucf_crime_results.json'}")
-    print(f"summary: {out_dir / 'ucf_crime_summary.csv'}")
+    print(f"results:  {out_dir / 'ucf_crime_results.json'}")
+    print(f"summary:  {out_dir / 'ucf_crime_summary.csv'}")
+    print(f"frames:   {frame_csv}")
+    print(f"progress: {progress_path}")
     return 0
 
 

@@ -33,8 +33,9 @@ Other Kaggle dataset slugs that work with the auto-discovery:
 - `umongsain/ucf-crime-labels` (labels only; pair with a video dataset)
 - `hiunguynththanh/ucfcrime-full`
 
-Enable **GPU T4/P100** in notebook settings. The detector and Re-ID weights download
-once on first run if internet is enabled.
+Enable **GPU T4 x2** in notebook settings. The detector and Re-ID weights download
+once on first run if internet is enabled. Use **Save & Run All** for long runs so Kaggle
+keeps the session alive after you close the tab (12-hour session cap; ~30 GPU hours/week).
 
 ## 2. Quick commands
 
@@ -67,16 +68,56 @@ once on first run if internet is enabled.
     --data-dir /kaggle/input --videos Abuse028,Fighting010,Normal001
 ```
 
-### Full run (all discovered videos)
+### Full dataset run (all discovered videos)
+
+Yes — just **omit `--limit-videos` and `--smoke`**. With default `--frames 300
+--stride 5`, "full dataset" means all ~1,900 videos × 300 sampled frames =
+**~570,000 YOLO + Re-ID inferences**, not every source frame.
 
 ```python
+# Recommended full run: 320px + batch 32 keeps it inside a 12h Kaggle session
 !cd /kaggle/working/OCSI && python kaggle_ucf_crime.py \
-    --data-dir /kaggle/input --frames 300 --stride 5 \
-    --stages baseline,memory,feedback,adaptive_memory
+    --data-dir /kaggle/input \
+    --frames 300 --stride 5 \
+    --imgsz 320 --batch-size 32 \
+    --stages baseline,memory,feedback \
+    --resume \
+    --out /kaggle/working/ocsi_ucf_outputs \
+    --cache /kaggle/working/ocsi_ucf_cache
 ```
 
-Detections are cached under `/kaggle/working/ocsi_ucf_cache`, so reruns with different
-stages are fast. Add `--refresh-cache` if you change detector/Re-ID settings.
+For maximum resolution (`--imgsz 640 --batch-size 16`), omit those two flags.
+Expect longer runtime.
+
+#### Time estimate (T4 x2, 4 CPU cores)
+
+| Settings | Detections | Est. runtime |
+|---|---:|---:|
+| `300 frames`, `imgsz 320`, `batch 32`, 3 stages | ~570k | **~4–6 h** |
+| `300 frames`, `imgsz 640`, `batch 16`, 3 stages | ~570k | **~6–10 h** |
+| same, but `--stages baseline,memory` | ~570k | ~0.7 h less |
+| **every source frame** (`--frames 100000 --stride 1`) | ~13–14M | **~3–4 days** — not one session |
+
+Batched inference (`--batch-size`) is what makes the full run practical: the old
+one-frame-per-call path could take 12–18 h on its own. Tracking itself is only
+~2 h for 1,900 videos × 300 frames × 3 stages.
+
+> If you literally need all ~13M frames, split the dataset into chunks with
+> `--videos` or `--classes` across sessions, or raise `--frames`/`--stride` only
+> for anomaly intervals you care about.
+
+#### Resume / crash safety
+
+The runner now appends one line per completed video/stage to
+`ucf_crime_progress.jsonl` and streams per-frame rows to
+`ucf_crime_frame_scores.csv`. Re-run with `--resume` to skip finished stages and
+reuse the detection cache in `ocsi_ucf_cache/`. Checkpoints carry a settings
+signature, so changing frames/stride/imgsz/stages starts a fresh set of rows
+instead of silently skipping with incompatible settings.
+
+`/kaggle/working` is wiped between sessions. To truly resume across sessions,
+save the `outputs/` and `cache/` folders as a Kaggle dataset or mount Google Drive
+and point `--out` / `--cache` there.
 
 ## 3. Flags
 
@@ -96,8 +137,10 @@ stages are fast. Add `--refresh-cache` if you change detector/Re-ID settings.
 | `--imgsz` | `640` | YOLO input size |
 | `--det-conf` | `0.15` | Person detection threshold |
 | `--reid-backend` | `auto` | `auto` / `torchvision` / `torchreid` |
+| `--batch-size` | `16` | Frames per YOLO/Re-ID batch (use 32 at `imgsz 320`) |
 | `--smoke` | off | 2 videos, 60 frames, baseline+memory |
 | `--refresh-cache` | off | Rebuild cached detections |
+| `--resume` | off | Skip video/stage pairs already in the progress file |
 | `--no-plots` | off | Skip PNG figures |
 
 ## 4. Outputs
@@ -108,6 +151,7 @@ In `/kaggle/working/ocsi_ucf_outputs/`:
 - `ucf_crime_summary.csv` — one row per video × stage (frame AUC, video score, IDs, flags)
 - `ucf_crime_frame_scores.csv` — one row per sampled frame with all signals:
   `anomaly_score`, `mean_q`, `n_active`, `n_lost`, `new_ids`, `mean_gate`, `gate_fraction`, …
+- `ucf_crime_progress.jsonl` — append-only checkpoint, one line per completed video/stage
 - `ucf_crime_auc.png` — mean frame AUC by stage
 - `ucf_crime_scores.png` — per-frame score curves for the first annotated anomaly video
 
