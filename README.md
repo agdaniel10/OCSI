@@ -150,7 +150,7 @@ those). A complete guide is in [`KAGGLE_UCF_CRIME.md`](KAGGLE_UCF_CRIME.md), and
 
 ```python
 # clone/pull, attach a UCF-Crime dataset, enable GPU T4 x2, then:
-# ALL ~1,900 videos (omit --limit-videos / --smoke). ~4-6 h at 320px, ~6-10 h at 640px.
+# ALL ~1,900 videos (omit --limit-videos / --smoke). ~7-10 h at 320px; 640px may exceed 12 h.
 !cd /kaggle/working/OCSI && python kaggle_ucf_crime.py \
     --frames 300 --stride 5 --imgsz 320 --batch-size 32 \
     --stages baseline,memory,feedback --resume

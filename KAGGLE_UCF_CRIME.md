@@ -93,14 +93,17 @@ Expect longer runtime.
 
 | Settings | Detections | Est. runtime |
 |---|---:|---:|
-| `300 frames`, `imgsz 320`, `batch 32`, 3 stages | ~570k | **~4–6 h** |
-| `300 frames`, `imgsz 640`, `batch 16`, 3 stages | ~570k | **~6–10 h** |
-| same, but `--stages baseline,memory` | ~570k | ~0.7 h less |
-| **every source frame** (`--frames 100000 --stride 1`) | ~13–14M | **~3–4 days** — not one session |
+| `300 frames`, `imgsz 320`, `batch 32`, 3 stages | ~570k | **~7–10 h** (fits 12 h cap, tight) |
+| `300 frames`, `imgsz 640`, `batch 16`, 3 stages | ~570k | **~10–14 h** — likely exceeds one session |
+| same, but `--stages baseline,memory` | ~570k | saves ~1–2 h |
+| official test split only (290 videos), same settings | ~87k | **~1–1.5 h** |
+| **every source frame** (`--frames 100000 --stride 1`) | ~13–14M | **~4–8 days** — not one session |
 
-Batched inference (`--batch-size`) is what makes the full run practical: the old
-one-frame-per-call path could take 12–18 h on its own. Tracking itself is only
-~2 h for 1,900 videos × 300 frames × 3 stages.
+These figures include both perception and tracking. A local benchmark of the tracker
+alone over 300 frames × 1,900 videos × 3 stages took **~3.8 h at 5 detections/frame**
+and **~7.5 h at 10 detections/frame**; Kaggle's 4 CPU cores are in that range. Batched
+inference keeps detection to ~3–4 h at 320 px, so the 640 px full run usually needs
+chunking or a second session. Use `--resume` either way.
 
 > If you literally need all ~13M frames, split the dataset into chunks with
 > `--videos` or `--classes` across sessions, or raise `--frames`/`--stride` only
