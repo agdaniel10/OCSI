@@ -160,6 +160,14 @@ def _limit_timestamps(
     return {key: value for key, value in frames.items() if key in keep}
 
 
+def _box_to_pixels(box: np.ndarray, frame_width: int, frame_height: int) -> np.ndarray:
+    """Convert AVA's normalised [0,1] boxes to xyxy pixels when needed."""
+    box = np.asarray(box, dtype=np.float32).copy()
+    if box.size == 4 and float(np.max(box)) <= 1.0 and float(np.min(box)) >= 0.0:
+        box *= np.array([frame_width, frame_height, frame_width, frame_height], dtype=np.float32)
+    return box
+
+
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
     x1 = max(float(a[0]), float(b[0]))
     y1 = max(float(a[1]), float(b[1]))
@@ -277,15 +285,17 @@ def extract_video_features(
         if frame_bgr is None:
             continue
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        frame_h, frame_w = frame_rgb.shape[:2]
         people = frames[(video_id, ts)]
-        boxes_tlwh = [
-            np.array(
-                [obs.box_xyxy[0], obs.box_xyxy[1],
-                 obs.box_xyxy[2] - obs.box_xyxy[0], obs.box_xyxy[3] - obs.box_xyxy[1]],
-                dtype=np.float32,
+        boxes_tlwh = []
+        for obs in people:
+            box = _box_to_pixels(obs.box_xyxy, frame_w, frame_h)
+            boxes_tlwh.append(
+                np.array(
+                    [box[0], box[1], box[2] - box[0], box[3] - box[1]],
+                    dtype=np.float32,
+                )
             )
-            for obs in people
-        ]
         try:
             embs = embedder(frame_rgb, boxes_tlwh)
         except Exception:
@@ -746,7 +756,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "gate_ablation": ablation,
         "note": (
             "AVA person_id is a per-frame box index, not a persistent track ID. "
-            "Pseudo-tracklets are built by IoU linking of GT boxes. The behaviour-noise "
+            "Pseudo-tracklets are built by IoU linking of GT boxes. AVA boxes are auto-scaled "
+            "from normalised [0,1] coordinates to pixels before cropping. The behaviour-noise "
             "injection is synthetic, but the action labels and HAR confidences are real. "
             "This validates the AVA behaviour layer, not MOT tracking metrics."
         ),

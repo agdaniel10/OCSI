@@ -16,25 +16,47 @@ AVA's `person_id` is a **per-frame box index**, not a persistent identity.
 The runner therefore links ground-truth boxes across neighbouring annotated
 timestamps with IoU to form clearly-labelled *pseudo-tracklets*.
 
-## Required Kaggle data
+## Verified Kaggle datasets to attach
 
-Attach a Kaggle dataset containing:
+I checked the Kaggle dataset API. These are public and currently exist:
 
-1. AVA train/val annotation CSVs, e.g. `ava_train_v2.2.csv`, `ava_val_v2.2.csv`
-2. AVA excluded-timestamps CSV, e.g. `ava_train_excluded_timestamps_v2.2.csv`
-3. The corresponding AVA video clips (`.mp4` files named by `video_id`)
+| Purpose | Kaggle link | Use as |
+|---|---|---|
+| Official AVA v2.2 annotations | <https://www.kaggle.com/datasets/mradul2/ava-official> | `--annotations-dir` |
+| AVA video subset (65 clips, ~33 GB) | <https://www.kaggle.com/datasets/zamankhan1409/ava-65-videos> | `--video-root` |
+
+Attach **both** to the same Kaggle notebook. The annotation dataset supplies
+`ava_train*.csv` / `ava_val*.csv`; the video dataset supplies the `.mp4` clips
+named by AVA `video_id`. With 65 videos, use `--max-videos 30` for a first
+full-scale behaviour-layer run.
+
+Other Kaggle AVA datasets found but **not** recommended for this runner:
+
+- <https://www.kaggle.com/datasets/lucianobautista/human-actions-dataset-extracted-from-ava-google>
+  — YOLO-format labels, not the AVA CSV format this script parses.
+- <https://www.kaggle.com/datasets/jacopocrispolti/ava-dataset>
+  — appears in search but returns 404 / is not reliably accessible.
+- `Aesthetic Visual Analysis (AVA)` datasets — these are image-preference AVA,
+  a completely different dataset.
+- <https://www.kaggle.com/datasets/ahmedtahashiha/hajj-all-frames>
+  — contains AVA-style `_2025` CSVs and frames, but is a renamed/modified
+  Hajj-focused variant; use only after inspecting it.
 
 The runner auto-discovers CSVs under `--annotations-dir` and videos under
-`--video-root`, but explicit paths are safer:
+`--video-root`, but explicit paths are safer. After attaching, run:
+
+```python
+!find /kaggle/input -maxdepth 5 -type f \( -name "*.csv" -o -name "*.mp4" \) | head -100
+```
 
 ```python
 !python kaggle_ava_har.py \
-    --annotations-dir /kaggle/input/ava/annotations \
-    --train-csv /kaggle/input/ava/annotations/ava_train_v2.2.csv \
-    --val-csv /kaggle/input/ava/annotations/ava_val_v2.2.csv \
-    --excluded-csv /kaggle/input/ava/annotations/ava_train_excluded_timestamps_v2.2.csv \
-    --video-root /kaggle/input/ava/videos \
-    --max-videos 40 \
+    --annotations-dir /kaggle/input/ava-official \
+    --train-csv /kaggle/input/ava-official/ava_train_v2.2.csv \
+    --val-csv /kaggle/input/ava-official/ava_val_v2.2.csv \
+    --excluded-csv /kaggle/input/ava-official/ava_train_excluded_timestamps_v2.2.csv \
+    --video-root /kaggle/input/ava-65-videos \
+    --max-videos 30 \
     --max-timestamps-per-video 300 \
     --window 8 \
     --min-window 4 \

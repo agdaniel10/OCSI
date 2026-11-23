@@ -176,9 +176,9 @@ feedback under controlled low-confidence behaviour noise. See
 ```python
 # clone/pull, attach an AVA dataset with CSVs + videos, enable GPU T4 x2
 !cd /kaggle/working/OCSI && python kaggle_ava_har.py \
-    --annotations-dir /kaggle/input/ava/annotations \
-    --video-root /kaggle/input/ava/videos \
-    --max-videos 40 --max-timestamps-per-video 300
+    --annotations-dir /kaggle/input/ava-official \
+    --video-root /kaggle/input/ava-65-videos \
+    --max-videos 30 --max-timestamps-per-video 300
 ```
 
 ## Layout

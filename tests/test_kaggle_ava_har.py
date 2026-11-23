@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from kaggle_ava_har import (
+    _box_to_pixels,
     average_precision,
     build_pseudo_tracklets,
     load_ava_frames,
@@ -44,6 +45,15 @@ def test_build_pseudo_tracklets_links_overlapping_boxes():
     assert len(tracks) == 2
     assert len(tracks[0].obs) == 2
     assert len(tracks[1].obs) == 1
+
+
+def test_normalised_ava_boxes_are_scaled_to_pixels():
+    normalised = np.array([0.10, 0.20, 0.50, 0.60], dtype=np.float32)
+    pixels = _box_to_pixels(normalised, 1920, 1080)
+    assert pixels.tolist() == [192.0, 216.0, 960.0, 648.0]
+
+    already_pixels = np.array([10, 20, 50, 60], dtype=np.float32)
+    assert _box_to_pixels(already_pixels, 1920, 1080).tolist() == [10, 20, 50, 60]
 
 
 def test_average_precision_perfect_ranking():
