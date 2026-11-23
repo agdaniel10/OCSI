@@ -7,5 +7,7 @@ __pycache__/
 ocsi_outputs/
 ocsi_ucf_outputs/
 ocsi_ucf_cache/
+ocsi_ava_outputs/
+ocsi_ava_cache/
 *.npz
 *.pt

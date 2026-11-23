@@ -162,6 +162,25 @@ It logs per-frame OCSI signals (`new_ids`, `n_lost`, `mean_q`, `mean_gate`) and
 writes frame/video anomaly AUCs plus CSV/JSON/PNG outputs under
 `/kaggle/working/ocsi_ucf_outputs/`.
 
+## AVA behaviour-feedback testing on Kaggle
+
+AVA supplies real person boxes and atomic action labels, so it is the correct
+dataset for validating OCSI's **behaviour layer** and confidence gate. It does
+not provide persistent identities, so IDF1/IDsw remain MOT17/MOT20 claims. The
+runner links AVA boxes into pseudo-tracklets, trains `TemporalHARRecognizer`
+prototypes, evaluates action mAP/macro-F1/ECE, and compares gated vs ungated
+feedback under controlled low-confidence behaviour noise. See
+[`KAGGLE_AVA_HAR.md`](KAGGLE_AVA_HAR.md) and
+[`kaggle_ava_har.ipynb`](kaggle_ava_har.ipynb).
+
+```python
+# clone/pull, attach an AVA dataset with CSVs + videos, enable GPU T4 x2
+!cd /kaggle/working/OCSI && python kaggle_ava_har.py \
+    --annotations-dir /kaggle/input/ava/annotations \
+    --video-root /kaggle/input/ava/videos \
+    --max-videos 40 --max-timestamps-per-video 300
+```
+
 ## Layout
 
 ```

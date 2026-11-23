@@ -15,7 +15,7 @@ default that can be replaced with a heavier model without touching the tracker.
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -136,3 +136,39 @@ class TemporalHARRecognizer(BehaviourRecognizer):
             mean_emb = np.mean(np.stack(embs), axis=0)
             norm = np.linalg.norm(mean_emb) + 1e-12
             self._class_protos[label] = mean_emb / norm
+
+    def train_on_multilabel_windows(
+        self,
+        windows: Sequence[Sequence[np.ndarray]],
+        targets: Sequence[Sequence[float]],
+    ) -> Dict[int, int]:
+        """Fit class prototypes from multi-label windows (AVA-style targets).
+
+        A window may carry several action labels. Each positive label receives the
+        window's pooled behaviour embedding as one centroid observation. Labels with
+        no training observations keep their initial prototype. The deterministic
+        temporal projection is deliberately left unchanged so this remains a light,
+        honest recognizer rather than an opaque HAR network.
+
+        Returns a mapping ``{label: observation_count}`` for auditability.
+        """
+        accumulators: Dict[int, List[np.ndarray]] = {i: [] for i in range(self.num_classes)}
+        for window, target in zip(windows, targets):
+            obs = self.observe(window)
+            if obs is None:
+                continue
+            labels = np.asarray(target, dtype=float).reshape(-1)
+            for label in np.flatnonzero(labels >= 0.5):
+                idx = int(label)
+                if 0 <= idx < self.num_classes:
+                    accumulators[idx].append(obs.embedding)
+
+        counts: Dict[int, int] = {}
+        for label, embs in accumulators.items():
+            counts[label] = len(embs)
+            if not embs:
+                continue
+            mean_emb = np.mean(np.stack(embs), axis=0)
+            norm = np.linalg.norm(mean_emb) + 1e-12
+            self._class_protos[label] = (mean_emb / norm).astype(np.float32)
+        return counts
