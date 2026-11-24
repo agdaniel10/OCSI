@@ -732,6 +732,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     train_frames = _limit_timestamps(train_frames, args.max_timestamps_per_video)
     val_frames = _limit_timestamps(val_frames, args.max_timestamps_per_video)
 
+    # The AVA annotation CSVs cover all 235 train / 64 val videos, but the Kaggle
+    # video subset covers only ~65 clips. Filter BEFORE selecting --max-videos,
+    # otherwise selected videos can have zero crops and contribute no windows.
+    video_index = _index_videos(video_root)
+    cache_stems = {path.stem for path in cache_dir.glob("*.npz")}
+    available_videos = set(video_index) | cache_stems
+    annotated_videos = {vid for vid, _ in train_frames} | {vid for vid, _ in val_frames}
+    train_frames = {k: v for k, v in train_frames.items() if k[0] in available_videos}
+    val_frames = {k: v for k, v in val_frames.items() if k[0] in available_videos}
+    print(
+        "video availability: "
+        f"{len(available_videos & annotated_videos)}/{len(annotated_videos)} "
+        "annotated videos have a clip or cached crops"
+    )
+
     if args.max_videos > 0:
         # Keep the limit per split. Limiting the union of sorted IDs previously
         # left almost no validation videos (e.g. 23 train / 2 val for 25 total).
@@ -771,7 +786,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Re-ID     : {embedder.backend_name}  dim={embedder.dim}")
     print(f"cache     : {cache_dir}")
 
-    video_index = _index_videos(video_root)
     all_frames = {**train_frames, **val_frames}
     all_tracks: Dict[str, List[Tracklet]] = {}
     features: Dict[str, Dict[str, np.ndarray]] = {}

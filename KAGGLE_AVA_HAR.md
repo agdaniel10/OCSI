@@ -68,7 +68,10 @@ The runner auto-discovers CSVs under `--annotations-dir` and videos under
 ```
 
 `--max-videos` now applies **per split**, so 25 gives up to 25 train and 25 val
-videos instead of the previous 23 train / 2 val skew.
+videos instead of the previous 23 train / 2 val skew. The runner also filters to
+videos that actually exist in the attached clip subset (or have cached crops)
+**before** applying `--max-videos`; otherwise many selected videos print `0
+crops` because the 65-clip Kaggle subset does not cover all AVA videos.
 
 Enable a Kaggle GPU. The script uses a pretrained Re-ID backbone to embed GT
 person crops; if weights cannot be downloaded it stops with a random-init
