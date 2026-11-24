@@ -9,6 +9,7 @@ from kaggle_ava_har import (
     load_ava_frames,
     make_windows,
     obs_key,
+    top1_multilabel_preds,
 )
 
 
@@ -45,6 +46,12 @@ def test_build_pseudo_tracklets_links_overlapping_boxes():
     assert len(tracks) == 2
     assert len(tracks[0].obs) == 2
     assert len(tracks[1].obs) == 1
+
+
+def test_top1_multilabel_preds_are_one_hot():
+    probs = np.array([[0.05, 0.80, 0.15], [0.60, 0.30, 0.10]])
+    preds = top1_multilabel_preds(probs, num_classes=3)
+    assert preds.tolist() == [[False, True, False], [True, False, False]]
 
 
 def test_normalised_ava_boxes_are_scaled_to_pixels():

@@ -77,8 +77,9 @@ paper results.
 4. Builds multi-label temporal windows and trains `TemporalHARRecognizer` class
    prototypes from the train split.
 5. Evaluates on the val split:
-   - action mAP
-   - macro-F1
+   - action mAP (primary AVA-style ranking metric)
+   - top-1 macro-F1
+   - macro-F1 at the naive 0.5 threshold (usually degenerate for 80 classes)
    - confidence expected calibration error (ECE)
 6. Runs a real-data gate ablation:
    - `no_feedback`: ignore behaviour observations
@@ -94,7 +95,7 @@ Under `/kaggle/working/ocsi_ava_outputs/`:
 | File | Contents |
 |---|---|
 | `ava_har_results.json` | config, split sizes, HAR metrics, gate ablation |
-| `ava_action_metrics.csv` | per-action AP, support, F1 |
+| `ava_action_metrics.csv` | per-action AP, support, top-1 F1, F1 at 0.5 |
 | `ava_gate_ablation.csv` | mAP and cosine-to-clean for the three feedback modes |
 
 ## How to interpret the gate result

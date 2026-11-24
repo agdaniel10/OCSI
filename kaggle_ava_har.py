@@ -398,6 +398,20 @@ def macro_f1(preds: np.ndarray, targets: np.ndarray) -> Tuple[float, List[float]
     return (float(np.mean(f1s)) if f1s else 0.0), f1s, supports
 
 
+def top1_multilabel_preds(probs: np.ndarray, num_classes: int) -> np.ndarray:
+    """Convert 80-way softmax scores to one-positive-per-window multi-label rows.
+
+    A fixed 0.5 threshold is inappropriate for an 80-class multi-label problem:
+    the max probability is often below 0.5 even when the ranking is useful.
+    Reporting top-1 F1 gives a non-degenerate complementary metric while mAP
+    remains the primary AVA-style ranking metric.
+    """
+    idx = np.argmax(np.asarray(probs, dtype=float), axis=1)
+    preds = np.zeros((len(idx), num_classes), dtype=bool)
+    preds[np.arange(len(idx)), idx] = True
+    return preds
+
+
 def expected_calibration_error(conf: np.ndarray, correct: np.ndarray, bins: int = 10) -> float:
     conf = np.asarray(conf, dtype=float)
     correct = np.asarray(correct, dtype=float)
@@ -432,7 +446,14 @@ def evaluate_recognizer(
         correct.append(1.0 if float(target[top1]) >= 0.5 else 0.0)
 
     if not probs_matrix:
-        return {"map": 0.0, "macro_f1": 0.0, "ece": 0.0, "n_windows": 0, "per_class": []}
+        return {
+            "map": 0.0,
+            "top1_macro_f1": 0.0,
+            "macro_f1_at_half": 0.0,
+            "ece": 0.0,
+            "n_windows": 0,
+            "per_class": [],
+        }
 
     probs = np.stack(probs_matrix).astype(float)
     tgt = np.stack(targets).astype(float)[:len(probs)]
@@ -450,15 +471,21 @@ def evaluate_recognizer(
         )
     valid_aps = [v for v in aps if v is not None]
     map_score = float(np.mean(valid_aps)) if valid_aps else 0.0
-    f1, f1s, supports = macro_f1(probs >= 0.5, tgt)
-    class_rows = [row for row, f1v, sup in zip(per_class, f1s, supports) if row["support"] > 0 or f1v > 0]
-    for row, f1v in zip(per_class, f1s):
-        if row in class_rows:
-            row["f1"] = round(f1v, 6)
+    f1_half, f1s_half, supports = macro_f1(probs >= 0.5, tgt)
+    pred_top1 = top1_multilabel_preds(probs, num_classes)
+    f1_top1, f1s_top1, _ = macro_f1(pred_top1, tgt)
+    class_rows = [
+        row for row, sup in zip(per_class, supports) if row["support"] > 0
+    ]
+    for idx, row in enumerate(per_class):
+        if row["support"] > 0:
+            row["f1"] = round(f1s_top1[idx], 6)
+            row["f1_at_half"] = round(f1s_half[idx], 6)
 
     return {
         "map": map_score,
-        "macro_f1": f1,
+        "top1_macro_f1": f1_top1,
+        "macro_f1_at_half": f1_half,
         "ece": expected_calibration_error(np.asarray(conf), np.asarray(correct)),
         "n_windows": len(probs),
         "per_class": class_rows,
@@ -709,7 +736,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     with (out_dir / "ava_action_metrics.csv").open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=["action_id", "ap", "support", "f1"])
+        writer = csv.DictWriter(
+            fh, fieldnames=["action_id", "ap", "support", "f1", "f1_at_half"]
+        )
         writer.writeheader()
         for row in metrics["per_class"]:
             writer.writerow(row)
@@ -749,7 +778,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         },
         "har": {
             "map": metrics["map"],
-            "macro_f1": metrics["macro_f1"],
+            "top1_macro_f1": metrics["top1_macro_f1"],
+            "macro_f1_at_half": metrics["macro_f1_at_half"],
             "ece": metrics["ece"],
             "n_windows": metrics["n_windows"],
         },
@@ -767,7 +797,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print("\n=== AVA behaviour-layer results ===")
     print(f"  action mAP     {metrics['map']:.4f}")
-    print(f"  macro F1       {metrics['macro_f1']:.4f}")
+    print(f"  top-1 macro F1 {metrics['top1_macro_f1']:.4f}")
+    print(f"  macro F1 @0.5  {metrics['macro_f1_at_half']:.4f}")
     print(f"  confidence ECE {metrics['ece']:.4f}")
     for row in ablation:
         print(
