@@ -75,23 +75,29 @@ def _find_csv(root: Path, kind: str) -> Optional[Path]:
     return sorted(matches, key=lambda p: (len(str(p)), str(p).lower()))[0] if matches else None
 
 
-def _find_excluded_csv(root: Path) -> Optional[Path]:
+def _find_excluded_csvs(root: Path) -> List[Path]:
     matches = [p for p in root.rglob("*.csv") if "excluded" in p.name.lower()]
-    return sorted(matches, key=lambda p: (len(str(p)), str(p).lower()))[0] if matches else None
+    return sorted(matches, key=lambda p: (len(str(p)), str(p).lower()))
 
 
-def load_excluded(path: Optional[Path]) -> set:
-    if path is None or not path.exists():
+def load_excluded(path: Any) -> set:
+    """Load one excluded-timestamp CSV or a sequence of them (train + val)."""
+    if path is None:
         return set()
-    out = set()
-    with path.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
-        for parts in csv.reader(fh):
-            if len(parts) < 2:
-                continue
-            try:
-                out.add((parts[0].strip(), int(round(float(parts[1])))))
-            except ValueError:
-                continue
+    paths = [path] if isinstance(path, (str, Path)) else list(path)
+    out: set = set()
+    for item in paths:
+        csv_path = Path(item)
+        if not csv_path.exists():
+            continue
+        with csv_path.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
+            for parts in csv.reader(fh):
+                if len(parts) < 2:
+                    continue
+                try:
+                    out.add((parts[0].strip(), int(round(float(parts[1])))))
+                except ValueError:
+                    continue
     return out
 
 
@@ -720,13 +726,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     train_csv = Path(args.train_csv) if args.train_csv else _find_csv(ann_root, "train")
     val_csv = Path(args.val_csv) if args.val_csv else _find_csv(ann_root, "val")
-    excluded_csv = Path(args.excluded_csv) if args.excluded_csv else _find_excluded_csv(ann_root)
+    excluded_paths = (
+        [Path(args.excluded_csv)]
+        if args.excluded_csv
+        else _find_excluded_csvs(ann_root)
+    )
     if train_csv is None or not train_csv.exists():
         raise SystemExit(f"Could not find AVA train CSV under {ann_root}; pass --train-csv")
     if val_csv is None or not val_csv.exists():
         raise SystemExit(f"Could not find AVA val CSV under {ann_root}; pass --val-csv")
 
-    excluded = load_excluded(excluded_csv)
+    excluded = load_excluded(excluded_paths)
     train_frames = load_ava_frames(train_csv, args.num_classes, excluded)
     val_frames = load_ava_frames(val_csv, args.num_classes, excluded)
     train_frames = _limit_timestamps(train_frames, args.max_timestamps_per_video)
@@ -781,7 +791,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"train CSV : {train_csv}")
     print(f"val CSV   : {val_csv}")
-    print(f"excluded  : {excluded_csv or 'none'}")
+    print(f"excluded  : {', '.join(p.name for p in excluded_paths) or 'none'}")
     print(f"videos    : {len(train_videos)} train / {len(val_videos)} val")
     print(f"Re-ID     : {embedder.backend_name}  dim={embedder.dim}")
     print(f"cache     : {cache_dir}")
@@ -854,7 +864,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "dataset": "AVA (person-centred atomic visual actions)",
         "train_csv": str(train_csv),
         "val_csv": str(val_csv),
-        "excluded_csv": str(excluded_csv) if excluded_csv else "",
+        "excluded_csv": [str(p) for p in excluded_paths],
         "config": {
             "max_videos": args.max_videos,
             "max_timestamps_per_video": args.max_timestamps_per_video,

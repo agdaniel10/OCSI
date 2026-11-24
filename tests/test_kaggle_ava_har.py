@@ -9,6 +9,7 @@ from kaggle_ava_har import (
     build_pseudo_tracklets,
     gate_ablation,
     load_ava_frames,
+    load_excluded,
     make_windows,
     obs_key,
     top1_multilabel_preds,
@@ -29,6 +30,14 @@ def test_load_ava_frames_groups_actions_and_applies_exclusions(tmp_path: Path):
     obs = frames[("vid1", 10.0)][0]
     assert obs.person_idx == 0
     assert obs.actions.tolist() == [1.0, 0.0, 1.0]
+
+
+def test_load_excluded_unions_train_and_val_files(tmp_path: Path):
+    train_excluded = tmp_path / "ava_train_excluded.csv"
+    val_excluded = tmp_path / "ava_val_excluded.csv"
+    train_excluded.write_text("vidA,10\n", encoding="utf-8")
+    val_excluded.write_text("vidB,20\n", encoding="utf-8")
+    assert load_excluded([train_excluded, val_excluded]) == {("vidA", 10), ("vidB", 20)}
 
 
 def test_build_pseudo_tracklets_links_overlapping_boxes():
