@@ -165,20 +165,23 @@ writes frame/video anomaly AUCs plus CSV/JSON/PNG outputs under
 ## AVA behaviour-feedback testing on Kaggle
 
 AVA supplies real person boxes and atomic action labels, so it is the correct
-dataset for validating OCSI's **behaviour layer** and confidence gate. It does
-not provide persistent identities, so IDF1/IDsw remain MOT17/MOT20 claims. The
-runner links AVA boxes into pseudo-tracklets, trains `TemporalHARRecognizer`
-prototypes, evaluates action mAP/macro-F1/ECE, and compares gated vs ungated
-feedback under controlled low-confidence behaviour noise. See
+dataset for validating OCSI's **behaviour layer** and confidence gate. Its
+`person_id` links boxes across adjacent annotated frames but does not provide
+long-term identities, so IDF1/IDsw remain MOT17/MOT20 claims. The runner builds
+short pseudo-tracklets, trains `TemporalHARRecognizer` prototypes, evaluates
+action mAP/F1/ECE, and compares clean, ungated, and gated feedback under
+controlled low-confidence, action-disjoint behaviour noise. See
 [`KAGGLE_AVA_HAR.md`](KAGGLE_AVA_HAR.md) and
 [`kaggle_ava_har.ipynb`](kaggle_ava_har.ipynb).
 
 ```python
-# clone/pull, attach an AVA dataset with CSVs + videos, enable GPU T4 x2
+# clone/pull, attach the AVA annotation + video datasets, enable GPU T4 x2
 !cd /kaggle/working/OCSI && python kaggle_ava_har.py \
-    --annotations-dir /kaggle/input/ava-official \
-    --video-root /kaggle/input/ava-65-videos \
-    --max-videos 30 --max-timestamps-per-video 300
+    --annotations-dir /kaggle/input/datasets/mradul2/ava-official/ava_files/annotations \
+    --video-root /kaggle/input/datasets/zamankhan1409/ava-65-videos \
+    --max-videos 25 --max-timestamps-per-video 300 \
+    --window 8 --min-window 4 \
+    --noise-fraction 0.25 --theta-b auto --theta-quantile 0.5
 ```
 
 ## Layout

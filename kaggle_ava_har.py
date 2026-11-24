@@ -2,12 +2,12 @@
 """AVA behaviour-feedback experiment for OCSI (Kaggle-ready).
 
 This runner validates the paper's *behaviour* layer with real person-centred
-action labels. It does NOT measure tracking metrics: AVA's ``person_id`` is a
-per-frame box index, not a persistent trajectory ID. Person pseudo-tracklets are
-therefore formed by linking ground-truth boxes across neighbouring annotated
-timestamps with IoU. These are used to train/evaluate the lightweight temporal
-HAR recognizer and to test the confidence gate under real HAR confidences with
-injected low-confidence behaviour noise.
+action labels. It does NOT measure tracking metrics. AVA's ``person_id`` links
+boxes of the same person in adjacent annotated frames (per the official AVA
+v2.2 format), so short pseudo-tracklets are formed primarily from that ID, with
+IoU/box continuity as a fallback. These are used to train/evaluate the lightweight
+temporal HAR recognizer and to test the confidence gate under real HAR
+confidences with injected low-confidence behaviour noise.
 
 Outputs (default ``/kaggle/working/ocsi_ava_outputs``)::
 
@@ -188,16 +188,46 @@ def build_pseudo_tracklets(
     iou_threshold: float = 0.3,
     max_gap_seconds: float = 2.0,
 ) -> List[Tracklet]:
-    """Link per-frame AVA box indices into pseudo-tracklets by box continuity."""
+    """Link AVA boxes into short pseudo-tracklets.
+
+    In AVA v2.2, ``person_id`` links boxes of the same person in adjacent
+    annotated frames. Use that ID first, then fall back to box IoU continuity
+    for annotations where the ID link is missing or ambiguous.
+    """
     stamps = sorted(ts for vid, ts in frames if vid == video_id)
     tracks: List[Tracklet] = []
     previous: List[Tuple[Tracklet, Observation]] = []
 
     for ts in stamps:
         current = frames[(video_id, ts)]
+        matched_current: set[int] = set()
+        used_previous: set[int] = set()
+
+        # Pass 1: official AVA person_id continuity across adjacent timestamps.
+        for ci, obs in enumerate(current):
+            candidates: List[Tuple[float, int]] = []
+            for pi, (_, last) in enumerate(previous):
+                if pi in used_previous:
+                    continue
+                gap = float(obs.ts) - float(last.ts)
+                if gap <= 0 or gap > max_gap_seconds:
+                    continue
+                if last.person_idx == obs.person_idx:
+                    candidates.append((gap, pi))
+            if candidates:
+                _, pi = min(candidates)
+                previous[pi][0].obs.append(obs)
+                matched_current.add(ci)
+                used_previous.add(pi)
+
+        # Pass 2: IoU fallback for the remaining boxes.
         pairs: List[Tuple[float, int, int]] = []
         for ci, obs in enumerate(current):
-            for pi, (track, last) in enumerate(previous):
+            if ci in matched_current:
+                continue
+            for pi, (_, last) in enumerate(previous):
+                if pi in used_previous:
+                    continue
                 gap = float(obs.ts) - float(last.ts)
                 if gap <= 0 or gap > max_gap_seconds:
                     continue
@@ -205,8 +235,6 @@ def build_pseudo_tracklets(
                 if overlap >= iou_threshold:
                     pairs.append((overlap, ci, pi))
 
-        matched_current = set()
-        used_previous = set()
         for _, ci, pi in sorted(pairs, key=lambda item: item[0], reverse=True):
             if ci in matched_current or pi in used_previous:
                 continue
@@ -487,6 +515,12 @@ def evaluate_recognizer(
         "top1_macro_f1": f1_top1,
         "macro_f1_at_half": f1_half,
         "ece": expected_calibration_error(np.asarray(conf), np.asarray(correct)),
+        "p_max": {
+            "mean": float(np.mean(conf)),
+            "median": float(np.median(conf)),
+            "max": float(np.max(conf)),
+            "min": float(np.min(conf)),
+        },
         "n_windows": len(probs),
         "per_class": class_rows,
     }
@@ -498,15 +532,22 @@ def gate_ablation(
     targets: Sequence[np.ndarray],
     metadata: Sequence[Dict[str, Any]],
     noise_fraction: float,
-    theta_b: float,
+    theta_b: Any,
+    theta_quantile: float,
     tau_b: float,
     seed: int,
 ) -> List[Dict[str, Any]]:
-    """Inject low-confidence wrong behaviour observations into AVA windows.
+    """Inject low-confidence, action-mismatched behaviour observations.
 
-    Gated mode ignores them via ``behaviour_gate``; ungated mode trusts them.
-    This uses real AVA action labels and real HAR confidences, with only the
-    behaviour-noise injection being synthetic.
+    Four modes are compared:
+
+    * ``no_feedback`` — prototype frozen at its first clean observation
+    * ``clean_feedback`` — full-trust updates from clean observations only
+    * ``ungated`` — full-trust updates including injected wrong observations
+    * ``gated`` — ``behaviour_gate`` ignores the injected low-confidence rows
+
+    Donors are chosen from windows with disjoint action labels, so contamination
+    is semantically wrong rather than merely another similar ReID crop.
     """
     rng = np.random.default_rng(seed)
     if not windows:
@@ -523,23 +564,49 @@ def gate_ablation(
     targets = list(targets)[: len(observations)]
     metadata = list(metadata)[: len(observations)]
 
+    p_max_values = np.asarray([item[2] for item in observations], dtype=float)
+    if theta_b is None or str(theta_b).strip().lower() == "auto":
+        theta_value = float(np.quantile(p_max_values, float(np.clip(theta_quantile, 0.0, 1.0))))
+    else:
+        theta_value = float(theta_b)
+
+    action_sets = [
+        frozenset(np.flatnonzero(np.asarray(t, dtype=float) >= 0.5).tolist())
+        for t in targets
+    ]
+
     by_track: Dict[Tuple[str, int], List[int]] = defaultdict(list)
     for i, meta in enumerate(metadata):
         by_track[(str(meta["video"]), int(meta["pseudo_track"]))].append(i)
 
     clean_embeddings = np.stack([item[1] for item in observations])
-    # Precompute one paired noise plan so all three modes see identical contamination.
+    # Precompute one paired noise plan so all modes see identical contamination.
     noise_plan: Dict[Tuple[str, int], List[Tuple[bool, int]]] = {}
     for key, indices in by_track.items():
         noisy = list(rng.random(len(indices)) < noise_fraction)
         if indices:
             noisy[0] = False  # the seed observation must stay clean
-        donors = [int(rng.integers(0, len(clean_embeddings))) for _ in indices]
+        donors: List[int] = []
+        for pos, idx in enumerate(indices):
+            if not noisy[pos]:
+                donors.append(idx)
+                continue
+            target_actions = action_sets[idx]
+            candidates = [
+                j for j in range(len(observations))
+                if action_sets[j].isdisjoint(target_actions)
+            ]
+            if candidates:
+                cand = np.asarray(candidates, dtype=int)
+                sims = clean_embeddings[cand] @ clean_embeddings[idx]
+                donors.append(int(cand[int(np.argmin(sims))]))
+            else:
+                donors.append(int(rng.integers(0, len(clean_embeddings))))
         noise_plan[key] = list(zip(noisy, donors))
 
     rows: List[Dict[str, Any]] = []
 
-    for mode in ("no_feedback", "ungated", "gated"):
+    for mode in ("no_feedback", "clean_feedback", "ungated", "gated"):
         probs_out: List[np.ndarray] = []
         cosines: List[float] = []
         label_indices: List[int] = []
@@ -553,19 +620,20 @@ def gate_ablation(
             proto = clean_embeddings[indices[0]].copy()
 
             for pos, (idx, (is_noisy, donor)) in enumerate(zip(indices, plan)):
-                if is_noisy:
+                noisy_now = is_noisy and mode != "clean_feedback"
+                if noisy_now:
                     emb = clean_embeddings[donor].copy()
-                    p_max = min(0.2, theta_b * 0.5)
+                    p_max = min(0.2, theta_value * 0.5)
                 else:
                     _, emb, p_max = observations[idx]
 
                 if mode == "no_feedback":
                     reliability = 0.0
-                elif mode == "ungated":
+                elif mode in ("ungated", "clean_feedback"):
                     reliability = 1.0
                 else:
                     reliability = float(
-                        behaviour_gate(p_max, 0.0, theta_b, tau_b, gate_enabled=True).reshape(-1)[0]
+                        behaviour_gate(p_max, 0.0, theta_value, tau_b, gate_enabled=True).reshape(-1)[0]
                     )
 
                 alpha = 0.7 + 0.3 * (1.0 - reliability)
@@ -593,7 +661,7 @@ def gate_ablation(
                 "mean_cosine_to_clean": float(np.mean(cosines)),
                 "n_tracks": len(cosines),
                 "noise_fraction": noise_fraction,
-                "theta_b": theta_b,
+                "theta_b": theta_value,
             }
         )
     return rows
@@ -619,7 +687,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--track-iou", type=float, default=0.3)
     parser.add_argument("--max-gap-seconds", type=float, default=2.0)
     parser.add_argument("--noise-fraction", type=float, default=0.25)
-    parser.add_argument("--theta-b", type=float, default=0.60)
+    parser.add_argument(
+        "--theta-b",
+        type=str,
+        default="auto",
+        help="fixed threshold or 'auto' (default: quantile of clean p_max)",
+    )
+    parser.add_argument(
+        "--theta-quantile",
+        type=float,
+        default=0.50,
+        help="p_max quantile used when --theta-b auto",
+    )
     parser.add_argument("--tau-b", type=float, default=30.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
@@ -654,10 +733,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     val_frames = _limit_timestamps(val_frames, args.max_timestamps_per_video)
 
     if args.max_videos > 0:
-        all_videos = sorted({vid for vid, _ in set(train_frames) | set(val_frames)})
-        keep = set(all_videos[: args.max_videos])
-        train_frames = {k: v for k, v in train_frames.items() if k[0] in keep}
-        val_frames = {k: v for k, v in val_frames.items() if k[0] in keep}
+        # Keep the limit per split. Limiting the union of sorted IDs previously
+        # left almost no validation videos (e.g. 23 train / 2 val for 25 total).
+        train_keep = set(sorted({vid for vid, _ in train_frames})[: args.max_videos])
+        val_keep = set(sorted({vid for vid, _ in val_frames})[: args.max_videos])
+        train_frames = {k: v for k, v in train_frames.items() if k[0] in train_keep}
+        val_frames = {k: v for k, v in val_frames.items() if k[0] in val_keep}
 
     train_videos = sorted({vid for vid, _ in train_frames})
     val_videos = sorted({vid for vid, _ in val_frames})
@@ -731,9 +812,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         recognizer, val_windows, val_targets, val_meta,
         noise_fraction=args.noise_fraction,
         theta_b=args.theta_b,
+        theta_quantile=args.theta_quantile,
         tau_b=args.tau_b,
         seed=args.seed,
     )
+    if str(args.theta_b).strip().lower() == "auto":
+        theta_effective = ablation[0]["theta_b"] if ablation else None
+    else:
+        theta_effective = float(args.theta_b)
 
     with (out_dir / "ava_action_metrics.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -763,7 +849,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "track_iou": args.track_iou,
             "max_gap_seconds": args.max_gap_seconds,
             "noise_fraction": args.noise_fraction,
-            "theta_b": args.theta_b,
+            "theta_b": theta_effective,
+            "theta_b_requested": args.theta_b,
+            "theta_quantile": args.theta_quantile,
             "tau_b": args.tau_b,
             "seed": args.seed,
             "reid_backend": embedder.backend_name,
@@ -781,15 +869,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "top1_macro_f1": metrics["top1_macro_f1"],
             "macro_f1_at_half": metrics["macro_f1_at_half"],
             "ece": metrics["ece"],
+            "p_max": metrics["p_max"],
             "n_windows": metrics["n_windows"],
         },
         "gate_ablation": ablation,
         "note": (
-            "AVA person_id is a per-frame box index, not a persistent track ID. "
-            "Pseudo-tracklets are built by IoU linking of GT boxes. AVA boxes are auto-scaled "
-            "from normalised [0,1] coordinates to pixels before cropping. The behaviour-noise "
-            "injection is synthetic, but the action labels and HAR confidences are real. "
-            "This validates the AVA behaviour layer, not MOT tracking metrics."
+            "AVA v2.2 person_id links boxes of the same person in adjacent annotated frames. "
+            "Short pseudo-tracklets are built from that ID first, with IoU box continuity as a "
+            "fallback; they are not long-term trajectories. AVA boxes are auto-scaled from "
+            "normalised [0,1] coordinates to pixels before cropping. The behaviour-noise "
+            "injection is synthetic and uses action-disjoint donors, but the action labels and "
+            "HAR confidences are real. This validates the AVA behaviour layer, not MOT tracking "
+            "metrics."
         ),
     }
     with (out_dir / "ava_har_results.json").open("w", encoding="utf-8") as fh:
@@ -800,6 +891,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"  top-1 macro F1 {metrics['top1_macro_f1']:.4f}")
     print(f"  macro F1 @0.5  {metrics['macro_f1_at_half']:.4f}")
     print(f"  confidence ECE {metrics['ece']:.4f}")
+    print(
+        "  p_max          "
+        f"mean={metrics['p_max']['mean']:.3f} median={metrics['p_max']['median']:.3f} "
+        f"max={metrics['p_max']['max']:.3f}"
+    )
+    print(f"  gate theta_b   {theta_effective}")
     for row in ablation:
         print(
             f"  {row['mode']:12s} mAP={row['map']:.4f}  "

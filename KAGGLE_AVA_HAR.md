@@ -12,9 +12,10 @@ It does **not** measure IDF1/IDsw/MOTA. Use MOT17/MOT20 for tracking claims.
 - `video_id`, timestamp, person box
 - multi-label atomic action IDs (up to 80 classes)
 
-AVA's `person_id` is a **per-frame box index**, not a persistent identity.
-The runner therefore links ground-truth boxes across neighbouring annotated
-timestamps with IoU to form clearly-labelled *pseudo-tracklets*.
+AVA v2.2's `person_id` links boxes of the same person in **adjacent annotated
+frames** (per the official format description). The runner uses that ID first to
+form short *pseudo-tracklets*, with box IoU as a fallback where the ID link is
+missing. These are still short spans, not long-term MOT trajectories.
 
 ## Verified Kaggle datasets to attach
 
@@ -50,18 +51,24 @@ The runner auto-discovers CSVs under `--annotations-dir` and videos under
 ```
 
 ```python
+!cd /kaggle/working/OCSI && git pull
 !python kaggle_ava_har.py \
-    --annotations-dir /kaggle/input/ava-official \
-    --train-csv /kaggle/input/ava-official/ava_train_v2.2.csv \
-    --val-csv /kaggle/input/ava-official/ava_val_v2.2.csv \
-    --excluded-csv /kaggle/input/ava-official/ava_train_excluded_timestamps_v2.2.csv \
-    --video-root /kaggle/input/ava-65-videos \
-    --max-videos 30 \
+    --annotations-dir /kaggle/input/datasets/mradul2/ava-official/ava_files/annotations \
+    --train-csv /kaggle/input/datasets/mradul2/ava-official/ava_files/annotations/ava_train_v2.2.csv \
+    --val-csv /kaggle/input/datasets/mradul2/ava-official/ava_files/annotations/ava_val_v2.2.csv \
+    --excluded-csv /kaggle/input/datasets/mradul2/ava-official/ava_files/annotations/ava_train_excluded_timestamps_v2.2.csv \
+    --video-root /kaggle/input/datasets/zamankhan1409/ava-65-videos \
+    --max-videos 25 \
     --max-timestamps-per-video 300 \
     --window 8 \
     --min-window 4 \
-    --noise-fraction 0.25
+    --noise-fraction 0.25 \
+    --theta-b auto \
+    --theta-quantile 0.5
 ```
+
+`--max-videos` now applies **per split**, so 25 gives up to 25 train and 25 val
+videos instead of the previous 23 train / 2 val skew.
 
 Enable a Kaggle GPU. The script uses a pretrained Re-ID backbone to embed GT
 person crops; if weights cannot be downloaded it stops with a random-init
@@ -71,7 +78,8 @@ paper results.
 ## What the script does
 
 1. Parses AVA annotations and removes excluded timestamps.
-2. Builds pseudo-tracklets by IoU-linking boxes at adjacent 1-second annotations.
+2. Builds short pseudo-tracklets from AVA `person_id` continuity, falling back to
+   IoU linking of boxes at adjacent 1-second annotations.
 3. Extracts one person crop embedding per annotated box and caches it under
    `/kaggle/working/ocsi_ava_cache/`.
 4. Builds multi-label temporal windows and trains `TemporalHARRecognizer` class
@@ -81,10 +89,17 @@ paper results.
    - top-1 macro-F1
    - macro-F1 at the naive 0.5 threshold (usually degenerate for 80 classes)
    - confidence expected calibration error (ECE)
-6. Runs a real-data gate ablation:
-   - `no_feedback`: ignore behaviour observations
-   - `ungated`: full-trust behaviour, including low-confidence wrong observations
-   - `gated`: `behaviour_gate()` ignores the low-confidence wrong observations
+6. Runs a real-data gate ablation with four modes:
+   - `no_feedback`: ignore behaviour observations (prototype frozen)
+   - `clean_feedback`: full-trust updates from clean observations only
+   - `ungated`: full-trust updates including injected wrong observations
+   - `gated`: `behaviour_gate()` ignores the injected low-confidence rows
+
+Wrong observations are drawn from windows with **disjoint action labels** and low
+`p_max`, rather than from random crops that may be semantically similar. The gate
+threshold is calibrated automatically as a quantile of the clean `p_max`
+distribution (`--theta-b auto --theta-quantile 0.5` by default), because a fixed
+`theta_b=0.6` is usually never reached by an 80-class softmax.
 
 The noise injection is synthetic; the action labels and HAR confidences are real.
 
@@ -96,33 +111,44 @@ Under `/kaggle/working/ocsi_ava_outputs/`:
 |---|---|
 | `ava_har_results.json` | config, split sizes, HAR metrics, gate ablation |
 | `ava_action_metrics.csv` | per-action AP, support, top-1 F1, F1 at 0.5 |
-| `ava_gate_ablation.csv` | mAP and cosine-to-clean for the three feedback modes |
+| `ava_gate_ablation.csv` | mAP and cosine-to-clean for the four feedback modes, with the effective `theta_b` |
 
 ## How to interpret the gate result
 
-A supported gate result should look like:
+A supported gate result should show all of the following:
 
 ```text
-ungated  mAP lower, cosine_to_clean lower
-gated    mAP close to no_feedback / clean, cosine_to_clean higher
+clean_feedback  mAP / cosine_to_clean best or near-best
+ungated         degraded relative to clean_feedback under injected noise
+gated           close to clean_feedback, and clearly better than ungated
+gated           cosine_to_clean > ungated cosine_to_clean
 ```
 
-If `gated` does not preserve prototype coherence better than `ungated`, the
-behaviour-feedback claim is not supported by this run.
+`gated == no_feedback` means the gate never opened; that is a threshold
+calibration failure, not evidence for the gate. `ungated > gated` means the
+injected observations were not harmful and the ablation cannot support the
+claim.
+
+A fixed high `theta_b` (e.g. 0.6 with 80 softmax classes) often produces exactly
+that failure. Inspect `har.p_max` in the JSON and the effective `theta_b` in the
+ablation CSV before drawing conclusions.
 
 ## Recommended paper wording
 
 > AVA person boxes with atomic action labels were used to train and validate the
-> behaviour layer. Because AVA does not provide persistent tracks, pseudo-tracklets
-> were formed by IoU-linking ground-truth boxes across adjacent annotations.
-> The confidence gate was tested by injecting low-confidence incorrect behaviour
-> observations; gated feedback preserved action-prototype coherence better than
-> ungated feedback. Tracking metrics were evaluated separately on MOT17/MOT20.
+> behaviour layer. Short pseudo-tracklets were formed using AVA `person_id`
+> continuity across adjacent annotated frames, with box overlap as a fallback;
+> these are not long-term trajectories. The confidence gate was tested by
+> injecting low-confidence, action-disjoint incorrect behaviour observations.
+> The threshold was calibrated from the observed confidence distribution.
+> Tracking metrics were evaluated separately on MOT17/MOT20. Only state that
+> gated feedback preserved coherence better than ungated feedback if the
+> ablation CSV actually shows it.
 
 ## Caveats
 
 - Not an official AVA HAR submission; this validates OCSI's lightweight recognizer.
-- Pseudo-tracklets are not ground-truth trajectories.
+- Pseudo-tracklets from AVA are short, adjacent-frame links, not long-term trajectories.
 - GT boxes are used for HAR training/evaluation, so detector error is not included.
 - No IDF1/IDsw/MOTA can be claimed from AVA.
 - Save `/kaggle/working/ocsi_ava_outputs/` before the Kaggle session ends.
